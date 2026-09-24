@@ -1,4 +1,4 @@
-﻿# Clash TUI Windows 开机自启注册脚本 (PowerShell)
+# Clash TUI Windows 开机自启注册脚本 (PowerShell)
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 Write-Host "=========================================================" -ForegroundColor Cyan
@@ -45,8 +45,13 @@ Write-Host ""
 $VbsPath = Join-Path $WorkDir "bin\silent_start.vbs"
 $VbsDir = Split-Path -Parent $VbsPath
 if (-not (Test-Path $VbsDir)) { New-Item -ItemType Directory -Path $VbsDir -Force | Out-Null }
-$VbsContent = "CreateObject(`"WScript.Shell`").Run `"`"`"$CoreExe`"`" -d `"`"$DataDir`"`"`, 0, False"
-[System.IO.File]::WriteAllText($VbsPath, $VbsContent, [System.Text.Encoding]::UTF8)
+$VbsContent = @"
+Dim WshShell
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run chr(34) & "$CoreExe" & chr(34) & " -d " & chr(34) & "$DataDir" & chr(34), 0, False
+"@
+# VBScript 仅支持 ANSI/ASCII 编码，禁止写入 UTF-8 BOM，否则 wscript 报 800A0408 无效字符错误
+[System.IO.File]::WriteAllText($VbsPath, $VbsContent, [System.Text.Encoding]::ASCII)
 
 Write-Host "[2/3] 生成静默启动引导器 (无黑框):" -ForegroundColor Green
 Write-Host "      $VbsPath"
