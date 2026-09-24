@@ -125,6 +125,9 @@ impl SubscriptionManager {
             let _ = fs::copy(&profile_path, &config_dest);
         }
 
+        // Inject user-defined proxy domain rules (rules.json) on top of profile rules
+        crate::rules::apply_rules_to_config();
+
         for (i, sub) in self.subscriptions.iter_mut().enumerate() {
             sub.active = i == idx;
         }
@@ -203,6 +206,9 @@ impl SubscriptionManager {
             } else {
                 let _ = fs::copy(&out_path, &config_dest);
             }
+
+            // Inject user-defined proxy domain rules (rules.json) on top of profile rules
+            crate::rules::apply_rules_to_config();
         }
 
         Ok((format!("Updated '{}' ({} nodes)", sub_name, node_count), node_count))

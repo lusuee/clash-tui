@@ -8,25 +8,48 @@ mod wininet {
     const INTERNET_OPTION_SETTINGS_CHANGED: u32 = 39;
     const INTERNET_OPTION_REFRESH: u32 = 37;
 
-    #[link(name = "wininet")]
+    type InternetSetOptionWFn = unsafe extern "system" fn(
+        h_internet: *mut std::ffi::c_void,
+        dw_option: u32,
+        lp_buffer: *mut std::ffi::c_void,
+        dw_buffer_length: u32,
+    ) -> i32;
+
+    #[link(name = "kernel32")]
     extern "system" {
-        fn InternetSetOptionW(
-            h_internet: *mut std::ffi::c_void,
-            dw_option: u32,
-            lp_buffer: *mut std::ffi::c_void,
-            dw_buffer_length: u32,
-        ) -> i32;
+        fn LoadLibraryW(lp_filename: *const u16) -> *mut std::ffi::c_void;
+        fn GetProcAddress(h_module: *mut std::ffi::c_void, lp_proc_name: *const u8) -> *mut std::ffi::c_void;
+    }
+
+    /// 运行时动态解析 InternetSetOptionW，避免依赖 wininet 导入库
+    fn resolve_internet_set_option() -> Option<InternetSetOptionWFn> {
+        unsafe {
+            let dll_name: Vec<u16> = "wininet.dll\0".encode_utf16().collect();
+            let lib = LoadLibraryW(dll_name.as_ptr());
+            if lib.is_null() {
+                return None;
+            }
+            let proc_name = b"InternetSetOptionW\0";
+            let addr = GetProcAddress(lib, proc_name.as_ptr());
+            if addr.is_null() {
+                return None;
+            }
+            Some(std::mem::transmute::<*mut std::ffi::c_void, InternetSetOptionWFn>(addr))
+        }
     }
 
     pub fn notify_system_proxy_change() {
+        let Some(set_option) = resolve_internet_set_option() else {
+            return;
+        };
         unsafe {
-            InternetSetOptionW(
+            set_option(
                 std::ptr::null_mut(),
                 INTERNET_OPTION_SETTINGS_CHANGED,
                 std::ptr::null_mut(),
                 0,
             );
-            InternetSetOptionW(
+            set_option(
                 std::ptr::null_mut(),
                 INTERNET_OPTION_REFRESH,
                 std::ptr::null_mut(),

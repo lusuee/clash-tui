@@ -1,6 +1,7 @@
 use crate::api::{ClashClient, ConnectionItem, ProxyItem};
 use crate::core::CoreManager;
 use crate::envproxy::EnvProxy;
+use crate::rules::RuleManager;
 use crate::subscriptions::SubscriptionManager;
 use crate::sysproxy::SysProxy;
 use ratatui::widgets::TableState;
@@ -13,12 +14,34 @@ pub enum ActiveTab {
     Connections = 1,
     Subscriptions = 2,
     Settings = 3,
+    Rules = 4,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ProxyFocus {
     Groups,
     Nodes,
+}
+
+/// 节点列表排序方式（Proxies 页按 `o` 循环切换）
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum NodeSort {
+    /// 订阅原始顺序
+    Default,
+    /// 按名称
+    Name,
+    /// 按延迟升序（未测速的排最后）
+    Ping,
+}
+
+impl NodeSort {
+    pub fn label(&self) -> &'static str {
+        match self {
+            NodeSort::Default => "Default",
+            NodeSort::Name => "Name",
+            NodeSort::Ping => "Ping",
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -34,10 +57,17 @@ pub struct AddSubModal {
     pub active_field: ModalField,
 }
 
+#[derive(Debug, Clone)]
+pub struct AddRuleModal {
+    pub input: String,
+}
+
 pub struct App {
     pub client: ClashClient,
     pub active_tab: ActiveTab,
     pub should_quit: bool,
+    /// 通过 Q 退出时是否已成功停止内核（决定退出提示文案）
+    pub core_stopped_on_exit: bool,
 
     // Core & Status
     pub core_version: String,
@@ -58,6 +88,7 @@ pub struct App {
 
     // Proxies View
     pub proxy_focus: ProxyFocus,
+    pub node_sort: NodeSort,
     pub proxy_groups: Vec<String>,
     pub selected_group_idx: usize,
     pub proxies: HashMap<String, ProxyItem>,
@@ -75,11 +106,16 @@ pub struct App {
     pub sub_mgr: SubscriptionManager,
     pub selected_sub_idx: usize,
 
+    // Domain Rules View
+    pub rule_mgr: RuleManager,
+    pub selected_rule_idx: usize,
+
     // Core Daemon
     pub core_mgr: CoreManager,
 
     // Modals
     pub show_add_sub_modal: Option<AddSubModal>,
+    pub show_add_rule_modal: Option<AddRuleModal>,
     pub show_edit_port_modal: Option<String>,
 
     // Table States for scrolling
@@ -87,6 +123,7 @@ pub struct App {
     pub nodes_table_state: TableState,
     pub connections_table_state: TableState,
     pub subs_table_state: TableState,
+    pub rules_table_state: TableState,
 
     // Test URL
     pub test_url: String,
@@ -103,6 +140,7 @@ impl App {
             client: ClashClient::new(base_url, secret),
             active_tab: ActiveTab::Proxies,
             should_quit: false,
+            core_stopped_on_exit: false,
 
             core_version: "Unknown".to_string(),
             is_connected: false,
@@ -120,6 +158,7 @@ impl App {
             down_history: vec![0; 36],
 
             proxy_focus: ProxyFocus::Nodes,
+            node_sort: NodeSort::Default,
             proxy_groups: Vec::new(),
             selected_group_idx: 0,
             proxies: HashMap::new(),
@@ -135,14 +174,19 @@ impl App {
             sub_mgr,
             selected_sub_idx: 0,
 
+            rule_mgr: RuleManager::new(),
+            selected_rule_idx: 0,
+
             core_mgr,
             show_add_sub_modal: None,
+            show_add_rule_modal: None,
             show_edit_port_modal: None,
 
             groups_table_state: TableState::default(),
             nodes_table_state: TableState::default(),
             connections_table_state: TableState::default(),
             subs_table_state: TableState::default(),
+            rules_table_state: TableState::default(),
 
             test_url: "http://www.gstatic.com/generate_204".to_string(),
         }
@@ -166,16 +210,18 @@ impl App {
             ActiveTab::Proxies => ActiveTab::Connections,
             ActiveTab::Connections => ActiveTab::Subscriptions,
             ActiveTab::Subscriptions => ActiveTab::Settings,
-            ActiveTab::Settings => ActiveTab::Proxies,
+            ActiveTab::Settings => ActiveTab::Rules,
+            ActiveTab::Rules => ActiveTab::Proxies,
         };
     }
 
     pub fn prev_tab(&mut self) {
         self.active_tab = match self.active_tab {
-            ActiveTab::Proxies => ActiveTab::Settings,
+            ActiveTab::Proxies => ActiveTab::Rules,
             ActiveTab::Connections => ActiveTab::Proxies,
             ActiveTab::Subscriptions => ActiveTab::Connections,
             ActiveTab::Settings => ActiveTab::Subscriptions,
+            ActiveTab::Rules => ActiveTab::Settings,
         };
     }
 
@@ -188,12 +234,34 @@ impl App {
     }
 
     pub fn current_group_nodes(&self) -> Vec<String> {
-        if let Some(group_name) = self.current_group_name() {
+        let mut nodes: Vec<String> = if let Some(group_name) = self.current_group_name() {
             if let Some(group) = self.proxies.get(group_name) {
-                return group.all.clone().unwrap_or_default();
+                group.all.clone().unwrap_or_default()
+            } else {
+                Vec::new()
             }
+        } else {
+            Vec::new()
+        };
+
+        match self.node_sort {
+            NodeSort::Default => {}
+            NodeSort::Name => nodes.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase())),
+            NodeSort::Ping => nodes.sort_by_key(|n| self.delays.get(n).copied().unwrap_or(u64::MAX)),
         }
-        Vec::new()
+
+        nodes
+    }
+
+    /// 循环切换节点排序：Default -> Name -> Ping -> Default
+    pub fn cycle_node_sort(&mut self) {
+        self.node_sort = match self.node_sort {
+            NodeSort::Default => NodeSort::Name,
+            NodeSort::Name => NodeSort::Ping,
+            NodeSort::Ping => NodeSort::Default,
+        };
+        // 重置光标避免越界或指向偏差
+        self.selected_node_idx = 0;
     }
 
     pub fn current_selected_node_name(&self) -> Option<String> {
@@ -225,6 +293,11 @@ impl App {
             ActiveTab::Subscriptions => {
                 if self.selected_sub_idx > 0 {
                     self.selected_sub_idx -= 1;
+                }
+            }
+            ActiveTab::Rules => {
+                if self.selected_rule_idx > 0 {
+                    self.selected_rule_idx -= 1;
                 }
             }
             ActiveTab::Settings => {}
@@ -259,6 +332,12 @@ impl App {
                     self.selected_sub_idx += 1;
                 }
             }
+            ActiveTab::Rules => {
+                let count = self.rule_mgr.rules.len();
+                if count > 0 && self.selected_rule_idx + 1 < count {
+                    self.selected_rule_idx += 1;
+                }
+            }
             ActiveTab::Settings => {}
         }
     }
@@ -283,6 +362,9 @@ impl App {
             }
             ActiveTab::Subscriptions => {
                 self.selected_sub_idx = self.selected_sub_idx.saturating_sub(step);
+            }
+            ActiveTab::Rules => {
+                self.selected_rule_idx = self.selected_rule_idx.saturating_sub(step);
             }
             ActiveTab::Settings => {}
         }
@@ -319,6 +401,12 @@ impl App {
                     self.selected_sub_idx = (self.selected_sub_idx + step).min(count - 1);
                 }
             }
+            ActiveTab::Rules => {
+                let count = self.rule_mgr.rules.len();
+                if count > 0 {
+                    self.selected_rule_idx = (self.selected_rule_idx + step).min(count - 1);
+                }
+            }
             ActiveTab::Settings => {}
         }
     }
@@ -340,6 +428,9 @@ impl App {
             }
             ActiveTab::Subscriptions => {
                 self.selected_sub_idx = 0;
+            }
+            ActiveTab::Rules => {
+                self.selected_rule_idx = 0;
             }
             ActiveTab::Settings => {}
         }
@@ -371,6 +462,12 @@ impl App {
                 let count = self.sub_mgr.subscriptions.len();
                 if count > 0 {
                     self.selected_sub_idx = count - 1;
+                }
+            }
+            ActiveTab::Rules => {
+                let count = self.rule_mgr.rules.len();
+                if count > 0 {
+                    self.selected_rule_idx = count - 1;
                 }
             }
             ActiveTab::Settings => {}
@@ -522,8 +619,27 @@ impl App {
         });
     }
 
+    pub fn open_add_rule_modal(&mut self) {
+        self.show_add_rule_modal = Some(AddRuleModal {
+            input: String::new(),
+        });
+    }
+
     pub fn close_modal(&mut self) {
         self.show_add_sub_modal = None;
+        self.show_add_rule_modal = None;
+    }
+
+    pub fn rule_modal_handle_char(&mut self, c: char) {
+        if let Some(modal) = &mut self.show_add_rule_modal {
+            modal.input.push(c);
+        }
+    }
+
+    pub fn rule_modal_backspace(&mut self) {
+        if let Some(modal) = &mut self.show_add_rule_modal {
+            modal.input.pop();
+        }
     }
 
     pub fn modal_handle_char(&mut self, c: char) {

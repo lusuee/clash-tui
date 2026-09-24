@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod core;
 mod envproxy;
+mod rules;
 mod subscriptions;
 mod sysproxy;
 mod theme;
@@ -76,7 +77,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
 
-    // 2. Ensure Mihomo Core daemon is active
+    // 2. Resolve working directory (portable layout for global install)
+    resolve_working_dir();
+
+    // 3. Ensure Mihomo Core daemon is active
     let core_mgr = CoreManager::new();
     let is_running = core_mgr.is_running(&api_url, secret.as_deref()).await;
     if !is_running && core_mgr.is_installed() {
@@ -292,7 +296,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, Show);
     let _ = io::stdout().flush();
 
-    println!("Clash TUI closed. Mihomo core continues running in the background.");
+    if app.core_stopped_on_exit {
+        println!("Clash TUI closed. Mihomo core has been stopped.");
+    } else {
+        println!("Clash TUI closed. Mihomo core continues running in the background.");
+    }
     std::process::exit(0);
 }
 
@@ -390,6 +398,52 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
         return;
     }
 
+    // Add Domain Rule modal
+    if app.show_add_rule_modal.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                app.close_modal();
+            }
+            KeyCode::Backspace => {
+                app.rule_modal_backspace();
+            }
+            KeyCode::Char(c) => {
+                app.rule_modal_handle_char(c);
+            }
+            KeyCode::Enter => {
+                if let Some(modal) = app.show_add_rule_modal.take() {
+                    let text = modal.input.trim().to_string();
+                    if text.is_empty() {
+                        app.set_status("✘ 域名不能为空");
+                    } else {
+                        match app.rule_mgr.add(&text) {
+                            Some(item) => {
+                                let (count, target) = rules::apply_rules_to_config();
+                                app.rule_mgr.target_hint = target;
+                                app.set_status(format!(
+                                    "✔ 已添加规则 {} {} (共 {} 条，热重载中...)",
+                                    item.rule_type, item.value, count
+                                ));
+                                let client = app.client.clone();
+                                let full_path = get_clean_config_path();
+                                tokio::spawn(async move {
+                                    let _ = client.reload_config(&full_path).await;
+                                });
+                            }
+                            None => {
+                                app.set_status("✘ 无效域名或规则已存在");
+                                // 保留弹窗继续编辑
+                                app.show_add_rule_modal = Some(modal);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
     // Normal navigation keystrokes
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -415,6 +469,9 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
         }
         KeyCode::Char('4') => {
             app.set_tab(ActiveTab::Settings);
+        }
+        KeyCode::Char('5') => {
+            app.set_tab(ActiveTab::Rules);
         }
         KeyCode::Up | KeyCode::Char('k') => {
             app.on_up();
@@ -485,6 +542,26 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
         }
         KeyCode::Char('P') => {
             app.open_edit_port_modal();
+        }
+        KeyCode::Char('o') => {
+            if app.active_tab == ActiveTab::Proxies {
+                app.cycle_node_sort();
+                app.set_status(format!("Node sort: [{}]", app.node_sort.label()));
+            }
+        }
+        KeyCode::Char('Q') => {
+            // 退出并停止内核（q / Ctrl+C 仅退出 TUI，内核常驻）
+            let core_mgr = CoreManager::new();
+            match core_mgr.stop_core() {
+                Ok(msg) => {
+                    app.core_stopped_on_exit = true;
+                    app.set_status(format!("✔ {} | Exiting...", msg));
+                }
+                Err(e) => {
+                    app.set_status(format!("✘ {} | Exiting anyway...", e));
+                }
+            }
+            app.should_quit = true;
         }
         KeyCode::Enter => {
             match app.active_tab {
@@ -580,6 +657,8 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
         KeyCode::Char('a') => {
             if app.active_tab == ActiveTab::Subscriptions {
                 app.open_add_sub_modal();
+            } else if app.active_tab == ActiveTab::Rules {
+                app.open_add_rule_modal();
             }
         }
         KeyCode::Char('u') => {
@@ -626,6 +705,24 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
                         app.selected_sub_idx = app.sub_mgr.subscriptions.len().saturating_sub(1);
                     }
                     app.set_status(format!("✔ Deleted subscription '{}'", removed.name));
+                }
+            } else if app.active_tab == ActiveTab::Rules && !app.rule_mgr.rules.is_empty() {
+                let idx = app.selected_rule_idx;
+                if let Some(removed) = app.rule_mgr.remove(idx) {
+                    if app.selected_rule_idx >= app.rule_mgr.rules.len() {
+                        app.selected_rule_idx = app.rule_mgr.rules.len().saturating_sub(1);
+                    }
+                    let (count, target) = rules::apply_rules_to_config();
+                    app.rule_mgr.target_hint = target;
+                    app.set_status(format!(
+                        "✔ 已删除规则 {} {} (剩余 {} 条，热重载中...)",
+                        removed.rule_type, removed.value, count
+                    ));
+                    let client = app.client.clone();
+                    let full_path = get_clean_config_path();
+                    tokio::spawn(async move {
+                        let _ = client.reload_config(&full_path).await;
+                    });
                 }
             }
         }
@@ -718,5 +815,28 @@ fn get_clean_config_path() -> String {
         cwd.join("data").join("config.yaml").to_string_lossy().to_string()
     } else {
         config_path.to_string_lossy().to_string()
+    }
+}
+
+/// 解析工作目录，支持全局命令安装（便携布局）：
+/// - 当前目录已存在 clash-tui 数据（subscriptions.json / rules.json / bin/mihomo.exe /
+///   data/config.yaml 之一）时，保持当前目录不变（开发与就地运行的既有行为）；
+/// - 否则切换到 exe 所在目录，使通过 PATH 全局启动时数据、内核与配置跟随安装目录，
+///   而不是散落在用户随意的 cwd 中。
+fn resolve_working_dir() {
+    let has_layout = ["subscriptions.json", "rules.json"]
+        .iter()
+        .any(|f| std::path::Path::new(f).exists())
+        || std::path::Path::new("bin").join("mihomo.exe").exists()
+        || std::path::Path::new("data").join("config.yaml").exists();
+
+    if has_layout {
+        return;
+    }
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let _ = std::env::set_current_dir(exe_dir);
+        }
     }
 }

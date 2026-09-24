@@ -30,6 +30,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         ActiveTab::Connections => render_connections_tab(f, app, chunks[2]),
         ActiveTab::Subscriptions => render_subscriptions_tab(f, app, chunks[2]),
         ActiveTab::Settings => render_settings_tab(f, app, chunks[2]),
+        ActiveTab::Rules => render_rules_tab(f, app, chunks[2]),
     }
 
     render_footer(f, app, chunks[3]);
@@ -37,6 +38,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // Render modal if open
     if let Some(modal) = &app.show_add_sub_modal {
         render_add_sub_modal(f, modal);
+    }
+    if let Some(modal) = &app.show_add_rule_modal {
+        render_add_rule_modal(f, modal);
     }
     if let Some(port_input) = &app.show_edit_port_modal {
         render_edit_port_modal(f, port_input);
@@ -207,6 +211,7 @@ fn render_tabs(f: &mut Frame, app: &App, area: Rect) {
         " [2] 󰈀 Connections ",
         " [3] 󰑓 Subscriptions ",
         " [4] 󰒓 Settings ",
+        " [5] 󰃢 Rules ",
     ];
     let tabs = Tabs::new(titles)
         .block(
@@ -327,10 +332,11 @@ fn render_proxies_tab(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|s| s.as_str());
 
     let node_title = format!(
-        " 󰈀 Nodes in [{}] ({}/{}) ",
+        " 󰈀 Nodes in [{}] ({}/{}) | Sort: [o]{} ",
         curr_group_name,
         if nodes.is_empty() { 0 } else { app.selected_node_idx + 1 },
-        nodes.len()
+        nodes.len(),
+        app.node_sort.label()
     );
 
     let node_block = Block::default()
@@ -577,6 +583,87 @@ fn render_subscriptions_tab(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 // ----------------------------------------------------------------------------
+// 5.5 Tab 5: Domain Rules View
+// ----------------------------------------------------------------------------
+fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            format!(
+                " 󰃢 Proxy Domain Rules ({}/{}) | Target: {} ",
+                if app.rule_mgr.rules.is_empty() { 0 } else { app.selected_rule_idx + 1 },
+                app.rule_mgr.rules.len(),
+                app.rule_mgr.target_hint
+            ),
+            Style::default().fg(Theme::BLUE).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Theme::active_border());
+
+    let mut rows = Vec::new();
+    for (idx, rule) in app.rule_mgr.rules.iter().enumerate() {
+        let is_selected = idx == app.selected_rule_idx;
+        let row_style = if is_selected {
+            Theme::selected_row_focused()
+        } else {
+            Theme::normal_row()
+        };
+
+        let pointer = if is_selected { "▶ " } else { "  " };
+        let (rule_color, rule_desc) = match rule.rule_type.as_str() {
+            "DOMAIN" => (Theme::MAUVE, "exact"),
+            "DOMAIN-SUFFIX" => (Theme::GREEN, "suffix"),
+            "DOMAIN-KEYWORD" => (Theme::PEACH, "keyword"),
+            _ => (Theme::TEXT, ""),
+        };
+
+        let cells = vec![
+            Cell::from(format!("{}{}", pointer, rule.rule_type))
+                .style(Style::default().fg(rule_color).add_modifier(Modifier::BOLD)),
+            Cell::from(rule.value.clone()),
+            Cell::from(Span::styled(rule_desc, Style::default().fg(Theme::MUTED))),
+        ];
+        rows.push(Row::new(cells).style(row_style));
+    }
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(20),
+            Constraint::Percentage(55),
+            Constraint::Length(12),
+        ],
+    )
+    .header(
+        Row::new(vec!["Rule Type", "Domain / Keyword", "Match"])
+            .style(Style::default().fg(Theme::SUBTEXT0).add_modifier(Modifier::BOLD)),
+    )
+    .block(block);
+
+    app.rules_table_state.select(if app.rule_mgr.rules.is_empty() {
+        None
+    } else {
+        Some(app.selected_rule_idx)
+    });
+    f.render_stateful_widget(table, area, &mut app.rules_table_state);
+
+    if app.rule_mgr.rules.len() > 1 {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+        let mut scrollbar_state =
+            ScrollbarState::new(app.rule_mgr.rules.len()).position(app.selected_rule_idx);
+        f.render_stateful_widget(
+            scrollbar,
+            area.inner(Margin { vertical: 1, horizontal: 0 }),
+            &mut scrollbar_state,
+        );
+    }
+}
+
+// ----------------------------------------------------------------------------
 // 6. Tab 4: Settings View
 // ----------------------------------------------------------------------------
 fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
@@ -759,6 +846,65 @@ fn render_add_sub_modal(f: &mut Frame, modal: &crate::app::AddSubModal) {
     f.render_widget(Paragraph::new(hint_line).alignment(Alignment::Center), chunks[2]);
 }
 
+fn render_add_rule_modal(f: &mut Frame, modal: &crate::app::AddRuleModal) {
+    let area = centered_rect(55, 28, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " 󰃢 Add Proxy Domain Rule ",
+            Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Theme::active_border());
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Hint
+            Constraint::Length(3), // Input box
+            Constraint::Length(2), // Help
+        ])
+        .split(inner);
+
+    let hint = Paragraph::new("Domain to route through proxy:")
+        .style(Style::default().fg(Theme::SUBTEXT0));
+    f.render_widget(hint, chunks[0]);
+
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Theme::MAUVE));
+    let input_text = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(modal.input.as_str(), Style::default().fg(Theme::TEXT).add_modifier(Modifier::BOLD)),
+        Span::styled("█", Style::default().fg(Theme::MAUVE)),
+    ]);
+    f.render_widget(Paragraph::new(input_text).block(input_block), chunks[1]);
+
+    let help_text = vec![
+        Line::from(vec![
+            Span::styled("example.com", Style::default().fg(Theme::GREEN)),
+            Span::raw("  → DOMAIN-SUFFIX (with subdomains)   "),
+            Span::styled("full:example.com", Style::default().fg(Theme::MAUVE)),
+            Span::raw("  → DOMAIN"),
+        ]),
+        Line::from(vec![
+            Span::styled("keyword:google", Style::default().fg(Theme::PEACH)),
+            Span::raw("  → DOMAIN-KEYWORD   "),
+            Span::styled("[Enter]", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+            Span::raw(" Save & Reload  "),
+            Span::styled("[Esc]", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
+            Span::raw(" Cancel"),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(help_text), chunks[2]);
+}
+
 fn render_edit_port_modal(f: &mut Frame, port_input: &str) {
     let area = centered_rect(50, 30, f.area());
     f.render_widget(Clear, area);
@@ -859,6 +1005,8 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw("Select  "),
                 Span::styled(" [t/T] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
                 Span::raw("Ping  "),
+                Span::styled(" [o] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),
+                Span::raw("Sort (Name/Ping)  "),
                 Span::styled(" [←/→] ", Style::default().fg(Theme::BLUE).add_modifier(Modifier::BOLD)),
                 Span::raw("Col  "),
                 Span::styled(" [PgUp/PgDn] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
@@ -896,6 +1044,14 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(" [s/S] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
                 Span::raw("Stop/Restart"),
             ]),
+            ActiveTab::Rules => Line::from(vec![
+                Span::styled(" [a] ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+                Span::raw("Add Domain  "),
+                Span::styled(" [x] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
+                Span::raw("Delete  "),
+                Span::styled(" [PgUp/PgDn] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
+                Span::raw("Page Scroll"),
+            ]),
         };
         f.render_widget(Paragraph::new(hint_line), chunks[0]);
     }
@@ -904,6 +1060,8 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let keys = vec![
         Span::styled("[q] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
         Span::raw("Quit  "),
+        Span::styled("[Q] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
+        Span::raw("Quit+Stop Core  "),
         Span::styled("[Tab] ", Style::default().fg(Theme::BLUE).add_modifier(Modifier::BOLD)),
         Span::raw("Next Tab  "),
         Span::styled("[p] ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
