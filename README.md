@@ -104,22 +104,24 @@ cd d:\github\clash-tui
 
 ### 配置开机自启（后台静默接管，无黑框）
 
-推荐将 **Mihomo 内核守护进程** 配置为开机自启：系统登录后自动在后台静默运行代理（支持 TUN 模式直接生效），无任何黑框或弹窗；日常需要调节点或测速时，随时在终端敲 `clash-tui` 或双击 `run.bat` 打开面板，退出终端（`q`）也不会中断后台网络代理。
+推荐将 **Mihomo 内核守护进程** 配置为开机自启：系统登录后自动在后台静默运行代理（Windows 下支持 TUN 模式直接生效），无任何黑框或弹窗；日常需要调节点或测速时，随时在终端敲 `clash-tui` 或双击 `run.bat` 打开面板，退出终端（`q`）也不会中断后台网络代理。
 
-#### Windows 一键脚本配置
+#### Windows 配置 (计划任务)
 
-- **开启自启**：双击运行根目录 [`autostart.bat`](autostart.bat)（自动请求管理员权限并注册 Windows 计划任务 `ClashTuiMihomo`，开机以最高权限静默启动）。
-- **取消自启**：双击运行根目录 [`unautostart.bat`](unautostart.bat) 即可一键注销。
+- **一键开启**：双击运行根目录 [`autostart.bat`](autostart.bat)（自动请求管理员权限并注册 Windows 计划任务 `ClashTuiMihomo`，开机以最高权限静默启动）。
+- **一键取消**：双击运行根目录 [`unautostart.bat`](unautostart.bat)。
+- **手动命令**（管理员终端）：
+  ```powershell
+  schtasks /create /tn "ClashTuiMihomo" /tr "\"%LOCALAPPDATA%\clash-tui\bin\mihomo.exe\" -d \"%LOCALAPPDATA%\clash-tui\data\"" /sc onlogon /rl highest /f
+  schtasks /delete /tn "ClashTuiMihomo" /f
+  ```
 
-#### 手动命令配置（Windows 计划任务）
+#### macOS / Linux 配置 (LaunchAgents / systemd)
 
-```powershell
-# 以管理员权限在终端运行（指定内核与数据目录）：
-schtasks /create /tn "ClashTuiMihomo" /tr "\"D:\github\clash-tui\bin\mihomo.exe\" -d \"D:\github\clash-tui\data\"" /sc onlogon /rl highest /f
-
-# 删除开机自启任务：
-schtasks /delete /tn "ClashTuiMihomo" /f
-```
+- **一键开启**：在终端运行 `bash autostart.sh`
+  - macOS：自动注册并加载 `~/Library/LaunchAgents/com.clash-tui.mihomo.plist`。
+  - Linux：自动配置并启用 `systemctl --user enable --now clash-tui-mihomo`。
+- **一键取消**：在终端运行 `bash unautostart.sh`。
 
 ### macOS / Linux 安装
 
@@ -166,7 +168,9 @@ clash-tui/
 ├── rules.json           # 自定义代理域名规则存档
 ├── run.bat              # 便捷启动脚本
 ├── autostart.bat        # 一键配置开机后台静默自启（Windows 计划任务）
-├── unautostart.bat      # 一键取消开机自启
+├── unautostart.bat      # 一键取消 Windows 开机自启
+├── autostart.sh         # 一键配置开机后台自启（macOS LaunchAgents / Linux systemd）
+├── unautostart.sh       # 一键取消 macOS / Linux 开机自启
 ├── install.bat          # 全局安装到用户 PATH（任意终端运行 clash-tui）
 ├── uninstall.bat        # 卸载全局安装
 └── Cargo.toml           # Rust 项目清单
