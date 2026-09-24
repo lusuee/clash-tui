@@ -1,55 +1,59 @@
 use ratatui::style::{Color, Modifier, Style};
 
-/// Catppuccin Mocha Palette
+/// Neon HUD Palette — high-contrast sci-fi terminal look
+/// 常量名保持与旧版（Catppuccin Mocha）一致，调用点无需改动
 #[allow(dead_code)]
 pub struct Theme;
 
 #[allow(dead_code)]
 impl Theme {
-    // Backgrounds & Surfaces
-    pub const CRUST: Color = Color::Rgb(17, 17, 27);       // #11111b
-    pub const MANTLE: Color = Color::Rgb(24, 24, 37);      // #181825
-    pub const BASE: Color = Color::Rgb(30, 30, 46);        // #1e1e2e
-    pub const SURFACE0: Color = Color::Rgb(49, 50, 68);    // #313244
-    pub const SURFACE1: Color = Color::Rgb(69, 71, 90);    // #45475a
-    pub const SURFACE2: Color = Color::Rgb(88, 91, 112);   // #585b70
-    pub const OVERLAY0: Color = Color::Rgb(108, 112, 134); // #6c7086
+    // Backgrounds & Surfaces (deep space / cyber abyss slate)
+    pub const CRUST: Color = Color::Rgb(6, 9, 15);          // #06090f
+    pub const MANTLE: Color = Color::Rgb(10, 15, 24);       // #0a0f18
+    pub const BASE: Color = Color::Rgb(13, 20, 32);         // #0d1420
+    pub const SURFACE0: Color = Color::Rgb(20, 32, 48);     // #142030
+    pub const SURFACE1: Color = Color::Rgb(30, 47, 71);     // #1e2f47
+    pub const SURFACE2: Color = Color::Rgb(45, 68, 99);     // #2d4463
+    pub const OVERLAY0: Color = Color::Rgb(75, 100, 132);   // #4b6484
 
-    // Foreground & Text
-    pub const TEXT: Color = Color::Rgb(205, 214, 244);     // #cdd6f4
-    pub const SUBTEXT0: Color = Color::Rgb(166, 173, 200); // #a6adc8
-    pub const MUTED: Color = Color::Rgb(127, 132, 156);    // #7f849c
+    // Foreground & Text (icy crisp white & cool slates)
+    pub const TEXT: Color = Color::Rgb(226, 237, 255);      // #e2edff
+    pub const SUBTEXT0: Color = Color::Rgb(145, 168, 198);  // #91a8c6
+    pub const MUTED: Color = Color::Rgb(92, 112, 138);      // #5c708a
 
-    // Accent Colors
-    pub const LAVENDER: Color = Color::Rgb(180, 190, 254); // #b4befe
-    pub const MAUVE: Color = Color::Rgb(203, 166, 247);    // #cba6f7
-    pub const SAPPHIRE: Color = Color::Rgb(116, 199, 236); // #74c7ec
-    pub const BLUE: Color = Color::Rgb(137, 180, 250);     // #89b4fa
-    pub const TEAL: Color = Color::Rgb(148, 226, 213);     // #94e2d5
-    pub const GREEN: Color = Color::Rgb(166, 227, 161);    // #a6e3a1
-    pub const YELLOW: Color = Color::Rgb(249, 226, 175);   // #f9e2af
-    pub const PEACH: Color = Color::Rgb(250, 179, 135);    // #fab387
-    pub const RED: Color = Color::Rgb(243, 139, 168);      // #f38ba8
+    // Accent Colors (cyber neon spectrum)
+    pub const CYAN: Color = Color::Rgb(0, 240, 255);        // #00f0ff electric cyan
+    pub const LAVENDER: Color = Color::Rgb(0, 229, 255);    // #00e5ff neon cyan (primary HUD)
+    pub const MAUVE: Color = Color::Rgb(180, 130, 255);     // #b482ff electric violet
+    pub const SAPPHIRE: Color = Color::Rgb(56, 189, 248);   // #38bdf8 ice blue
+    pub const BLUE: Color = Color::Rgb(96, 165, 250);       // #60a5fa cyber blue
+    pub const TEAL: Color = Color::Rgb(45, 212, 191);       // #2dd4bf neon aqua
+    pub const GREEN: Color = Color::Rgb(52, 211, 153);      // #34d399 matrix emerald
+    pub const YELLOW: Color = Color::Rgb(251, 191, 36);     // #fbbf24 cyber amber
+    pub const PEACH: Color = Color::Rgb(251, 146, 60);      // #fb923c neon orange
+    pub const RED: Color = Color::Rgb(244, 63, 94);         // #f43f5e neon crimson
 
     // Common UI Styles
     pub fn title_style() -> Style {
         Style::default()
-            .fg(Self::MAUVE)
+            .fg(Self::LAVENDER)
             .add_modifier(Modifier::BOLD)
     }
 
     pub fn active_border() -> Style {
-        Style::default().fg(Self::LAVENDER)
+        Style::default()
+            .fg(Self::CYAN)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn inactive_border() -> Style {
-        Style::default().fg(Self::SURFACE1)
+        Style::default().fg(Self::SURFACE2)
     }
 
     pub fn selected_row_focused() -> Style {
         Style::default()
             .bg(Self::SURFACE1)
-            .fg(Self::TEXT)
+            .fg(Self::CYAN)
             .add_modifier(Modifier::BOLD)
     }
 
@@ -64,14 +68,30 @@ impl Theme {
     }
 
     pub fn latency_color(ms: u64) -> Color {
-        if ms < 150 {
+        if ms < 100 {
             Self::GREEN
-        } else if ms < 300 {
+        } else if ms < 200 {
+            Self::TEAL
+        } else if ms < 350 {
             Self::YELLOW
-        } else if ms < 700 {
+        } else if ms < 600 {
             Self::PEACH
         } else {
             Self::RED
+        }
+    }
+
+    pub fn latency_badge(ms: u64) -> (&'static str, Color) {
+        if ms < 100 {
+            ("⚡", Self::GREEN)
+        } else if ms < 200 {
+            ("●", Self::TEAL)
+        } else if ms < 350 {
+            ("▲", Self::YELLOW)
+        } else if ms < 600 {
+            ("◆", Self::PEACH)
+        } else {
+            ("■", Self::RED)
         }
     }
 
@@ -91,7 +111,7 @@ impl Theme {
 
     pub fn mode_color(mode: &str) -> Color {
         match mode.to_lowercase().as_str() {
-            "rule" => Self::BLUE,
+            "rule" => Self::LAVENDER,
             "global" => Self::MAUVE,
             "direct" => Self::YELLOW,
             _ => Self::TEXT,

@@ -60,14 +60,14 @@ clash-tui/
 |---|---|---|
 | `src/main.rs` | 程序入口、事件循环、**所有键盘事件分发**、后台任务 | `main`、`AppEvent`、`handle_key_event`、`get_clean_config_path` |
 | `src/app.rs` | 核心状态机 `App`（唯一可变状态）、Tab/焦点/光标、弹窗模型、格式化工具 | `App`、`ActiveTab`、`ProxyFocus`、`AddSubModal`、`AddRuleModal`、`update_proxies` |
-| `src/ui.rs` | 纯渲染层（每帧全量重绘），无业务逻辑 | `render`、`render_*_tab`、`render_add_sub_modal`、`render_add_rule_modal`、`render_edit_port_modal` |
+| `src/ui.rs` | 纯渲染层（Cyber HUD 一体化面板、全息弹窗、Emoji 宽度安全排版），无业务逻辑 | `render`、`render_*_tab`、`render_add_sub_modal`、`format_display_name` |
 | `src/api.rs` | Mihomo REST 客户端（可 Clone，供 tokio task 持有） | `ClashClient` |
 | `src/core.rs` | Mihomo 内核守护进程生命周期管理 | `CoreManager::{start_core, stop_core, start_core_as_admin, is_running, ensure_default_config}` |
 | `src/subscriptions.rs` | 订阅 CRUD、下载解析、**生成本地生效配置** | `SubscriptionManager::{add, delete, set_active, update_subscription}`、`parse_node_count` |
 | `src/rules.rs` | 自定义代理域名规则：持久化、解析、YAML 注入 | `RuleManager`、`parse_domain_input`、`resolve_proxy_target`、`inject_domain_rules`、`apply_rules_to_config` |
 | `src/sysproxy.rs` | 系统代理（WinINet / macOS networksetup） | `SysProxy::{get_status, set_proxy}` |
 | `src/envproxy.rs` | 环境变量代理 + shell 脚本生成 | `EnvProxy::{get_status, set_env_proxy, generate_shell_scripts}` |
-| `src/theme.rs` | Catppuccin Mocha 调色板与通用样式 | `Theme::{GREEN, LAVENDER, latency_color, protocol_color, active_border, ...}` |
+| `src/theme.rs` | Cyber Neon HUD 调色板与组件样式 | `Theme::{GREEN, CYAN, LAVENDER, latency_badge, protocol_color, ...}` |
 
 **分层规则**：`main.rs`（输入/事件）→ `app.rs`（状态）→ `ui.rs`（渲染）；网络与系统操作经 `api.rs` / `core.rs` / `subscriptions.rs` / `sysproxy.rs` / `envproxy.rs`，通过 `tokio::spawn` 异步执行，结果以 `AppEvent` 回到主循环更新状态。渲染函数不做 I/O。
 

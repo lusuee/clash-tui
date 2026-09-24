@@ -9,10 +9,12 @@
 - ⚡ **极致轻量与瞬间秒开**：
   - 单一原生编译二进制（仅 ~9MB），**内存占用低至 8MB~15MB**，冷启动 `<10ms`。
   - 无需安装 Python 运行环境或 Node.js/Chromium 开销。
-- 🎨 **Catppuccin Mocha 现代暗色美学**：
-  - 采用优雅柔和的 Catppuccin Mocha 终端调色盘。
-  - 顶部嵌入 **Ratatui Sparkline 动态折线波形图**，毫秒级实时呈现上下行流量脉冲趋势。
-  - 节点列表采用 Nerd Fonts 与彩色协议药丸胶囊（`[SS]`, `[Trojan]`, `[VMess]`, `[Hy2]`），延迟阶梯指示灯（绿 `<150ms` / 黄 `<300ms` / 红 `>300ms`）。
+- 🎨 **赛博科技感 HUD 终端美学**：
+  - 采用深空深渊底色配合高对比度 Neon 赛博（Electric Cyan、Matrix Emerald、Electric Violet 等）调色盘。
+  - 顶部双舱位一体化 **系统遥测中枢与动态流量波形（Sparkline）**，实时呈现上下行流量脉冲趋势与系统代理/TUN/端口状态胶囊。
+  - 全面采用现代化圆角边框（Rounded Borders）与模块编号导航卡片（`01 PROXIES`、`02 CONNECTIONS`...）。
+  - 节点列表配备多级延迟状态指示仪表（`⚡` 超低延时 `<100ms` / `●` 良好 `<200ms` / `▲` 中等 `<350ms` / `◆` 较高 `<600ms` / `■` 延迟）与协议彩色标签。
+  - 内置 Emoji 字体排版保护（自动规避现代终端中天气、国旗等宽字符与英文字母的渲染重叠）。
 - 🌐 **多维度网络代理控制**：
   - **系统代理 (SysProxy, `p`)**：
     - Windows：直接调用 WinINet 底层 API 刷新系统网络栈，浏览器即时生效。
@@ -76,7 +78,7 @@
 
 ```powershell
 # 切换到目录
-cd C:\Users\fm\.gemini\antigravity\scratch\clash-tui
+cd d:\github\clash-tui
 
 # 运行 Rust 原生客户端（默认连接 127.0.0.1:9090，代理端口 7897）
 .\target\release\clash-tui.exe
