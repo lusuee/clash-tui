@@ -1,0 +1,15 @@
+# Rust
+/target
+
+# Python
+__pycache__/
+*.pyc
+
+# Mihomo binary and runtime data
+/bin/
+/data/
+/profiles/
+subscriptions.json
+
+# Logs
+*.log
