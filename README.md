@@ -102,6 +102,25 @@ cd d:\github\clash-tui
 .\uninstall.bat    # 移除 PATH 条目，可选删除安装目录（含数据，会二次确认）
 ```
 
+### 配置开机自启（后台静默接管，无黑框）
+
+推荐将 **Mihomo 内核守护进程** 配置为开机自启：系统登录后自动在后台静默运行代理（支持 TUN 模式直接生效），无任何黑框或弹窗；日常需要调节点或测速时，随时在终端敲 `clash-tui` 或双击 `run.bat` 打开面板，退出终端（`q`）也不会中断后台网络代理。
+
+#### Windows 一键脚本配置
+
+- **开启自启**：双击运行根目录 [`autostart.bat`](autostart.bat)（自动请求管理员权限并注册 Windows 计划任务 `ClashTuiMihomo`，开机以最高权限静默启动）。
+- **取消自启**：双击运行根目录 [`unautostart.bat`](unautostart.bat) 即可一键注销。
+
+#### 手动命令配置（Windows 计划任务）
+
+```powershell
+# 以管理员权限在终端运行（指定内核与数据目录）：
+schtasks /create /tn "ClashTuiMihomo" /tr "\"D:\github\clash-tui\bin\mihomo.exe\" -d \"D:\github\clash-tui\data\"" /sc onlogon /rl highest /f
+
+# 删除开机自启任务：
+schtasks /delete /tn "ClashTuiMihomo" /f
+```
+
 ### macOS / Linux 安装
 
 前置：安装 Rust（`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`），并将 Mihomo 内核（darwin 版）放在项目 `bin/mihomo`（`chmod +x bin/mihomo`）。然后：
@@ -126,11 +145,11 @@ cargo build --release
 
 ```
 clash-tui/
-├── src/
+├── src/                  # 全部 Rust 源码（单二进制）
 │   ├── main.rs          # 异步主事件循环、键盘交互、后台任务监听
 │   ├── app.rs           # 核心应用状态机、焦点管理、流量历史队列
 │   ├── ui.rs            # Ratatui 现代界面渲染器、Sparkline 流量波形、弹窗
-│   ├── theme.rs         # Catppuccin Mocha 调色板与组件样式定义
+│   ├── theme.rs         # Cyber Neon HUD 调色板与组件样式定义
 │   ├── envproxy.rs      # 跨平台环境变量代理 (Windows 注册表 + Shell 脚本生成)
 │   ├── sysproxy.rs      # 跨平台 (Windows WinINet / macOS networksetup) 系统代理切换
 │   ├── core.rs          # 跨平台 (Windows/macOS) 内核守护进程管理与 UAC 提权
@@ -146,6 +165,8 @@ clash-tui/
 ├── subscriptions.json   # 订阅元数据存档
 ├── rules.json           # 自定义代理域名规则存档
 ├── run.bat              # 便捷启动脚本
+├── autostart.bat        # 一键配置开机后台静默自启（Windows 计划任务）
+├── unautostart.bat      # 一键取消开机自启
 ├── install.bat          # 全局安装到用户 PATH（任意终端运行 clash-tui）
 ├── uninstall.bat        # 卸载全局安装
 └── Cargo.toml           # Rust 项目清单
