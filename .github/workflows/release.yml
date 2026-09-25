@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag (e.g. v0.1.0)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Apple Silicon (M1/M2/M3/M4)
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            bin_name: clash-tui
+            archive_prefix: clash-tui-darwin-arm64
+            archive_type: tar.gz
+          # macOS Intel
+          - target: x86_64-apple-darwin
+            os: macos-13
+            bin_name: clash-tui
+            archive_prefix: clash-tui-darwin-x64
+            archive_type: tar.gz
+          # Windows x64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            bin_name: clash-tui.exe
+            archive_prefix: clash-tui-windows-x64
+            archive_type: zip
+          # Linux x64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            bin_name: clash-tui
+            archive_prefix: clash-tui-linux-x64
+            archive_type: tar.gz
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package artifacts (Unix)
+        if: matrix.archive_type == 'tar.gz'
+        shell: bash
+        run: |
+          STAGE_DIR="${{ matrix.archive_prefix }}"
+          mkdir -p "$STAGE_DIR"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "$STAGE_DIR/"
+          chmod +x "$STAGE_DIR/${{ matrix.bin_name }}"
+
+          # Copy helper scripts and documentation
+          for f in install.sh uninstall.sh run.sh autostart.sh unautostart.sh env.sh unenv.sh README.md; do
+            if [ -f "$f" ]; then
+              cp "$f" "$STAGE_DIR/"
+            fi
+          done
+
+          ARCHIVE="${{ matrix.archive_prefix }}.tar.gz"
+          tar -czvf "$ARCHIVE" "$STAGE_DIR"
+          shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
+
+      - name: Package artifacts (Windows)
+        if: matrix.archive_type == 'zip'
+        shell: pwsh
+        run: |
+          $stage = "${{ matrix.archive_prefix }}"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" -Destination "$stage\"
+
+          # Copy helper scripts and documentation
+          $files = @(
+            "install.bat", "uninstall.bat", "run.bat", "autostart.bat", "unautostart.bat",
+            "autostart.ps1", "unautostart.ps1", "env.bat", "unenv.bat", "env.ps1", "unenv.ps1",
+            "env.nu", "unenv.nu", "README.md"
+          )
+          foreach ($f in $files) {
+            if (Test-Path $f) {
+              Copy-Item $f -Destination "$stage\"
+            }
+          }
+
+          $archive = "${{ matrix.archive_prefix }}.zip"
+          Compress-Archive -Path "$stage" -DestinationPath $archive -Force
+          $hash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLower()
+          "$hash  $archive" | Out-File -Encoding ascii "${archive}.sha256"
+
+      - name: Upload build archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive_prefix }}
+          path: |
+            ${{ matrix.archive_prefix }}.${{ matrix.archive_type }}
+            ${{ matrix.archive_prefix }}.${{ matrix.archive_type }}.sha256
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Determine tag name
+        id: vars
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            echo "tag=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create or update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: Clash TUI ${{ steps.vars.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/*

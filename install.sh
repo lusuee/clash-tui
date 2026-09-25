@@ -5,20 +5,37 @@ set -e
 cd "$(dirname "$0")"
 
 INSTALL_DIR="$HOME/.clash-tui"
-EXE="target/release/clash-tui"
+EXE=""
+if [ -f "./clash-tui" ]; then
+  EXE="./clash-tui"
+  echo "[1/3] Using pre-compiled release binary ($EXE)..."
+elif [ -f "target/release/clash-tui" ]; then
+  EXE="target/release/clash-tui"
+  echo "[1/3] Using existing build binary ($EXE)..."
+else
+  # Try to source cargo env if installed via rustup but not yet in PATH
+  if ! command -v cargo >/dev/null 2>&1 && [ -f "$HOME/.cargo/env" ]; then
+    . "$HOME/.cargo/env"
+  fi
 
-if [ ! -f bin/mihomo ]; then
-  echo "[ERROR] Mihomo kernel not found at bin/mihomo"
-  echo "        Download the darwin/linux build from https://github.com/MetaCubeX/mihomo/releases"
-  echo "        and place it at bin/mihomo (chmod +x)."
-  exit 1
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "[ERROR] cargo command not found and no pre-compiled binary found."
+    echo "        To build from source, please install Rust:"
+    echo "          1. Official rustup (recommended):"
+    echo "             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    echo "             source \"\$HOME/.cargo/env\""
+    echo "          2. Or via Homebrew:"
+    echo "             brew install rust"
+    exit 1
+  fi
+
+  echo "[1/3] Building release binary from source..."
+  cargo build --release
+  EXE="target/release/clash-tui"
 fi
 
-echo "[1/3] Building release binary..."
-cargo build --release
-
 if [ ! -f "$EXE" ]; then
-  echo "[ERROR] $EXE not found after build."
+  echo "[ERROR] $EXE not found."
   exit 1
 fi
 
@@ -29,8 +46,14 @@ chmod +x "$INSTALL_DIR/clash-tui"
 
 # Seed kernel and data on first install
 if [ ! -f "$INSTALL_DIR/bin/mihomo" ]; then
-  cp bin/mihomo "$INSTALL_DIR/bin/mihomo"
-  chmod +x "$INSTALL_DIR/bin/mihomo"
+  if [ -f bin/mihomo ]; then
+    cp bin/mihomo "$INSTALL_DIR/bin/mihomo"
+    chmod +x "$INSTALL_DIR/bin/mihomo"
+  else
+    echo "[WARNING] Mihomo kernel not found at bin/mihomo."
+    echo "          Download it from https://github.com/MetaCubeX/mihomo/releases"
+    echo "          and place it at $INSTALL_DIR/bin/mihomo (chmod +x)."
+  fi
 fi
 if [ ! -f "$INSTALL_DIR/subscriptions.json" ] && [ -f subscriptions.json ]; then
   cp subscriptions.json "$INSTALL_DIR/"

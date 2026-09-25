@@ -74,17 +74,20 @@
 
 ### 直接运行
 
-项目已编译完成 release 二进制，双击根目录 `run.bat` 或在终端运行：
+若已有编译产物或预编译发布包：
 
+**Windows**：双击根目录 `run.bat` 或在终端运行：
 ```powershell
-# 切换到目录
-cd d:\github\clash-tui
-
-# 运行 Rust 原生客户端（默认连接 127.0.0.1:9090，代理端口 7897）
-.\target\release\clash-tui.exe
-
-# 或指定远程 controller 与 secret
+.\run.bat
+# 或直接运行二进制
 .\target\release\clash-tui.exe -u http://127.0.0.1:9090 --secret your_secret
+```
+
+**macOS / Linux**：在终端运行根目录 `run.sh`：
+```bash
+./run.sh
+# 或直接运行二进制
+./target/release/clash-tui -u http://127.0.0.1:9090 --secret your_secret
 ```
 
 ### 安装为全局命令（任意终端直接运行 `clash-tui`）
@@ -125,8 +128,17 @@ cd d:\github\clash-tui
 
 ### macOS / Linux 安装
 
-前置：安装 Rust（`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`），并将 Mihomo 内核（darwin 版）放在项目 `bin/mihomo`（`chmod +x bin/mihomo`）。然后：
+**方式一：下载预编译发布包（推荐，免装 Rust）**
+从 GitHub Releases 下载对应架构的 `clash-tui-darwin-arm64.tar.gz`（Apple Silicon）或 `clash-tui-darwin-x64.tar.gz`（Intel）并解压：
+```bash
+tar -xzvf clash-tui-darwin-arm64.tar.gz
+cd clash-tui-darwin-arm64
+bash install.sh
+```
+若已包含可执行文件，`install.sh` 会直接完成安装，无需编译。
 
+**方式二：源码编译安装**
+前置：安装 Rust（`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` 或 `brew install rust`），并将 Mihomo 内核（darwin 版）放在项目 `bin/mihomo`（`chmod +x bin/mihomo`）。然后：
 ```bash
 bash install.sh
 ```
@@ -135,11 +147,20 @@ bash install.sh
 
 > macOS 下系统代理通过 `networksetup` 自动切换、环境变量代理写入 `~/.clash_env.sh` + `launchctl`；TUN 模式需要以 `sudo` 运行内核。
 
-### 重新编译
+### 本地编译与打包
 
-```powershell
-cargo build --release
-```
+- **仅重新编译**：
+  ```bash
+  cargo build --release
+  ```
+- **一键打包为发布压缩包 (.tar.gz)**：
+  ```bash
+  bash package.sh
+  ```
+  产物将生成在 `dist/clash-tui-<os>-<arch>.tar.gz`。
+
+- **GitHub Actions 云端自动构建**：
+  已配置 `.github/workflows/release.yml`。每次推送 `v*` 格式标签（如 `git tag v0.1.0 && git push origin v0.1.0`）或在 GitHub Actions 页面手动点击触发，GitHub 将自动编译 macOS (Apple Silicon / Intel)、Windows、Linux 对应版本的原生可执行压缩包并自动发布到 GitHub Releases。
 
 ---
 

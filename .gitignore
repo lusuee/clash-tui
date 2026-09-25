@@ -14,3 +14,12 @@ rules.json
 
 # Logs
 *.log
+
+# Distribution artifacts
+/dist/
+clash-tui
+clash-tui.exe
+
+# macOS
+.DS_Store
+

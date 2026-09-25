@@ -3,10 +3,11 @@ setlocal
 chcp 65001 >nul
 
 set "INSTALL_DIR=%LOCALAPPDATA%\clash-tui"
-set "EXE=%~dp0target\release\clash-tui.exe"
+set "EXE=%~dp0clash-tui.exe"
+if not exist "%EXE%" set "EXE=%~dp0target\release\clash-tui.exe"
 
 if not exist "%EXE%" (
-    echo [ERROR] Not found: %EXE%
+    echo [ERROR] Not found clash-tui.exe or target\release\clash-tui.exe
     echo         Run "cargo build --release" first.
     exit /b 1
 )
