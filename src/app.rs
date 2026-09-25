@@ -105,6 +105,7 @@ pub struct App {
     // Subscriptions View
     pub sub_mgr: SubscriptionManager,
     pub selected_sub_idx: usize,
+    pub updating_subs: HashSet<String>,
 
     // Domain Rules View
     pub rule_mgr: RuleManager,
@@ -173,6 +174,7 @@ impl App {
 
             sub_mgr,
             selected_sub_idx: 0,
+            updating_subs: HashSet::new(),
 
             rule_mgr: RuleManager::new(),
             selected_rule_idx: 0,

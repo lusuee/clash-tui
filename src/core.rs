@@ -186,4 +186,210 @@ impl CoreManager {
             Err("Admin elevation helper currently only configured for Windows (use sudo on macOS/Linux)".to_string())
         }
     }
+
+    pub fn is_autostart_enabled(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(home) = std::env::var_os("HOME") {
+                let plist = PathBuf::from(home)
+                    .join("Library/LaunchAgents/com.clash-tui.mihomo.plist");
+                return plist.exists();
+            }
+            false
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let output = std::process::Command::new("schtasks")
+                .args(["/query", "/tn", "ClashTuiMihomo"])
+                .output();
+            matches!(output, Ok(o) if o.status.success())
+        }
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        {
+            if let Some(home) = std::env::var_os("HOME") {
+                let service = PathBuf::from(home)
+                    .join(".config/systemd/user/clash-tui-mihomo.service");
+                return service.exists();
+            }
+            false
+        }
+    }
+
+    pub fn enable_autostart(&self) -> Result<String, String> {
+        let abs_bin = std::fs::canonicalize(&self.bin_path)
+            .unwrap_or_else(|_| self.bin_path.clone());
+        let abs_data = std::fs::canonicalize(&self.data_dir)
+            .unwrap_or_else(|_| self.data_dir.clone());
+        let log_file = abs_data.join("mihomo.log");
+
+        #[cfg(target_os = "macos")]
+        {
+            let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+            let plist_dir = PathBuf::from(&home).join("Library/LaunchAgents");
+            let _ = std::fs::create_dir_all(&plist_dir);
+            let plist_file = plist_dir.join("com.clash-tui.mihomo.plist");
+
+            let plist_content = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.clash-tui.mihomo</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+        <string>-d</string>
+        <string>{}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{}</string>
+    <key>StandardErrorPath</key>
+    <string>{}</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
+"#,
+                abs_bin.display(),
+                abs_data.display(),
+                log_file.display(),
+                log_file.display()
+            );
+
+            std::fs::write(&plist_file, plist_content)
+                .map_err(|e| format!("Failed to write plist: {}", e))?;
+
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", "-w", plist_file.to_str().unwrap()])
+                .output();
+
+            let out = std::process::Command::new("launchctl")
+                .args(["load", "-w", plist_file.to_str().unwrap()])
+                .output()
+                .map_err(|e| format!("Failed to run launchctl load: {}", e))?;
+
+            if out.status.success() {
+                Ok("Autostart service enabled (macOS LaunchAgents: com.clash-tui.mihomo)".to_string())
+            } else {
+                Err(format!("launchctl error: {}", String::from_utf8_lossy(&out.stderr)))
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let task_run = format!("\"{}\" -d \"{}\"", abs_bin.display(), abs_data.display());
+            let output = std::process::Command::new("schtasks")
+                .args(["/create", "/tn", "ClashTuiMihomo", "/tr", &task_run, "/sc", "onlogon", "/rl", "highest", "/f"])
+                .output()
+                .map_err(|e| format!("Failed to execute schtasks: {}", e))?;
+
+            if output.status.success() {
+                Ok("Autostart service enabled (Windows Scheduled Task: ClashTuiMihomo)".to_string())
+            } else {
+                Err("Failed to create scheduled task. Try running as Administrator.".to_string())
+            }
+        }
+
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        {
+            let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+            let service_dir = PathBuf::from(&home).join(".config/systemd/user");
+            let _ = std::fs::create_dir_all(&service_dir);
+            let service_file = service_dir.join("clash-tui-mihomo.service");
+
+            let service_content = format!(
+                r#"[Unit]
+Description=Clash TUI Mihomo Core Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={} -d {}
+Restart=always
+RestartSec=3
+StandardOutput=append:{}
+StandardError=append:{}
+
+[Install]
+WantedBy=default.target
+"#,
+                abs_bin.display(),
+                abs_data.display(),
+                log_file.display(),
+                log_file.display()
+            );
+
+            std::fs::write(&service_file, service_content)
+                .map_err(|e| format!("Failed to write service file: {}", e))?;
+
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "daemon-reload"])
+                .output();
+
+            let out = std::process::Command::new("systemctl")
+                .args(["--user", "enable", "--now", "clash-tui-mihomo"])
+                .output()
+                .map_err(|e| format!("Failed to execute systemctl: {}", e))?;
+
+            if out.status.success() {
+                Ok("Autostart service enabled (systemd: clash-tui-mihomo)".to_string())
+            } else {
+                Err(format!("systemctl error: {}", String::from_utf8_lossy(&out.stderr)))
+            }
+        }
+    }
+
+    pub fn disable_autostart(&self) -> Result<String, String> {
+        #[cfg(target_os = "macos")]
+        {
+            let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+            let plist_file = PathBuf::from(&home).join("Library/LaunchAgents/com.clash-tui.mihomo.plist");
+            if plist_file.exists() {
+                let _ = std::process::Command::new("launchctl")
+                    .args(["unload", "-w", plist_file.to_str().unwrap()])
+                    .output();
+                let _ = std::fs::remove_file(&plist_file);
+                Ok("Autostart service disabled (LaunchAgent removed)".to_string())
+            } else {
+                Ok("Autostart service is not currently enabled".to_string())
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let output = std::process::Command::new("schtasks")
+                .args(["/delete", "/tn", "ClashTuiMihomo", "/f"])
+                .output()
+                .map_err(|e| format!("Failed to execute schtasks: {}", e))?;
+
+            if output.status.success() {
+                Ok("Autostart service disabled (Scheduled task removed)".to_string())
+            } else {
+                Ok("Autostart service is not currently enabled".to_string())
+            }
+        }
+
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        {
+            let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+            let service_file = PathBuf::from(&home).join(".config/systemd/user/clash-tui-mihomo.service");
+            if service_file.exists() {
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "disable", "--now", "clash-tui-mihomo"])
+                    .output();
+                let _ = std::fs::remove_file(&service_file);
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "daemon-reload"])
+                    .output();
+                Ok("Autostart service disabled (systemd service removed)".to_string())
+            } else {
+                Ok("Autostart service is not currently enabled".to_string())
+            }
+        }
+    }
 }

@@ -32,7 +32,10 @@ pub enum AppEvent {
     Version(Result<VersionInfo, String>),
     Connections(Result<ConnectionsResponse, String>),
     DelayResult { node: String, result: Result<u64, String> },
-    SubUpdated { msg: String, node_count: usize },
+    SubUpdated {
+        sub_id: String,
+        result: Result<subscriptions::SubUpdateResult, String>,
+    },
     SubActivated { msg: String },
     CoreActionDone(String),
     TunToggled(Result<bool, String>),
@@ -46,6 +49,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut secret: Option<String> = None;
 
     let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "autostart" => {
+                resolve_working_dir();
+                let core_mgr = CoreManager::new();
+                let action = args.get(2).map(|s| s.as_str()).unwrap_or("status");
+                match action {
+                    "on" | "enable" | "start" => match core_mgr.enable_autostart() {
+                        Ok(msg) => println!("✔ {}", msg),
+                        Err(e) => eprintln!("✘ {}", e),
+                    },
+                    "off" | "disable" | "stop" => match core_mgr.disable_autostart() {
+                        Ok(msg) => println!("✔ {}", msg),
+                        Err(e) => eprintln!("✘ {}", e),
+                    },
+                    "status" => {
+                        let enabled = core_mgr.is_autostart_enabled();
+                        if enabled {
+                            println!("✔ Autostart is currently [ENABLED]");
+                        } else {
+                            println!("○ Autostart is currently [DISABLED]");
+                        }
+                    }
+                    _ => {
+                        println!("Usage: clash-tui autostart <on|off|status>");
+                    }
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -64,7 +100,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "-h" | "--help" => {
                 println!("Clash TUI - Modern Cross-Platform Mihomo/Clash Terminal Client");
                 println!();
-                println!("Usage: clash-tui [OPTIONS]");
+                println!("Usage: clash-tui [OPTIONS] [COMMAND]");
+                println!();
+                println!("Commands:");
+                println!("  autostart <on|off|status>  Manage background kernel autostart");
                 println!();
                 println!("Options:");
                 println!("  -u, --url <URL>        Clash REST API URL (default: http://127.0.0.1:9090)");
@@ -231,19 +270,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                AppEvent::SubUpdated { msg, .. } => {
-                    app.set_status(format!("✔ {}", msg));
-                    // Trigger core reload & refresh proxies
-                    let client = app.client.clone();
-                    let tx_refresh = tx.clone();
-                    let full_path = get_clean_config_path();
-                    tokio::spawn(async move {
-                        let _ = client.reload_config(&full_path).await;
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                        if let Ok(proxies) = client.get_proxies().await {
-                            let _ = tx_refresh.send(AppEvent::Proxies(Ok(proxies)));
+                AppEvent::SubUpdated { sub_id, result } => {
+                    app.updating_subs.remove(&sub_id);
+                    match result {
+                        Ok(res) => {
+                            app.sub_mgr.apply_update(&res);
+                            app.set_status(format!("✔ Updated '{}' ({} nodes)", res.sub_name, res.node_count));
+                            if res.is_active {
+                                let client = app.client.clone();
+                                let tx_refresh = tx.clone();
+                                let full_path = get_clean_config_path();
+                                tokio::spawn(async move {
+                                    if let Ok(()) = client.reload_config(&full_path).await {
+                                        tokio::time::sleep(Duration::from_millis(300)).await;
+                                        if let Ok(proxies) = client.get_proxies().await {
+                                            let _ = tx_refresh.send(AppEvent::Proxies(Ok(proxies)));
+                                        }
+                                        if let Ok(configs) = client.get_configs().await {
+                                            let _ = tx_refresh.send(AppEvent::Configs(Ok(configs)));
+                                        }
+                                    }
+                                });
+                            }
                         }
-                    });
+                        Err(e) => {
+                            app.set_status(format!("✘ {}", e));
+                        }
+                    }
                 }
                 AppEvent::SubActivated { msg } => {
                     app.set_status(msg);
@@ -370,25 +423,28 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
                     let name = modal.name_input.trim().to_string();
                     let url = modal.url_input.trim().to_string();
                     if !name.is_empty() && !url.is_empty() {
-                        let _sub = app.sub_mgr.add(name.clone(), url.clone());
+                        let sub = app.sub_mgr.add(name.clone(), url.clone());
+                        let sub_id = sub.id.clone();
+                        let sub_name = sub.name.clone();
+                        let sub_url = sub.url.clone();
+                        let is_active = sub.active;
+                        let mixed_port = app.mixed_port;
+                        let profiles_dir = app.sub_mgr.profiles_dir.clone();
+                        app.updating_subs.insert(sub_id.clone());
                         app.set_status(format!("✔ Added subscription '{}'. Fetching...", name));
 
                         // Spawn download
-                        let mut sub_mgr = app.sub_mgr.clone();
                         let tx_sub = tx.clone();
-                        let sub_idx = app.sub_mgr.subscriptions.len().saturating_sub(1);
                         tokio::spawn(async move {
-                            match sub_mgr.update_subscription(sub_idx).await {
-                                Ok((msg, count)) => {
-                                    let _ = tx_sub.send(AppEvent::SubUpdated { msg, node_count: count });
-                                }
-                                Err(e) => {
-                                    let _ = tx_sub.send(AppEvent::SubUpdated {
-                                        msg: format!("Failed to update: {}", e),
-                                        node_count: 0,
-                                    });
-                                }
-                            }
+                            let result = subscriptions::SubscriptionManager::download_and_update(
+                                sub_id.clone(),
+                                sub_name,
+                                sub_url,
+                                is_active,
+                                mixed_port,
+                                profiles_dir,
+                            ).await;
+                            let _ = tx_sub.send(AppEvent::SubUpdated { sub_id, result });
                         });
                     }
                 }
@@ -664,21 +720,27 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
         KeyCode::Char('u') => {
             if app.active_tab == ActiveTab::Subscriptions && !app.sub_mgr.subscriptions.is_empty() {
                 let idx = app.selected_sub_idx;
-                let mut sub_mgr = app.sub_mgr.clone();
+                let sub = &app.sub_mgr.subscriptions[idx];
+                let sub_id = sub.id.clone();
+                let sub_name = sub.name.clone();
+                let sub_url = sub.url.clone();
+                let is_active = sub.active;
+                let mixed_port = app.mixed_port;
+                let profiles_dir = app.sub_mgr.profiles_dir.clone();
+                app.updating_subs.insert(sub_id.clone());
+                app.set_status(format!("Updating subscription '{}' in background...", sub_name));
+
                 let tx_sub = tx.clone();
-                app.set_status("Updating subscription in background...");
                 tokio::spawn(async move {
-                    match sub_mgr.update_subscription(idx).await {
-                        Ok((msg, count)) => {
-                            let _ = tx_sub.send(AppEvent::SubUpdated { msg, node_count: count });
-                        }
-                        Err(e) => {
-                            let _ = tx_sub.send(AppEvent::SubUpdated {
-                                msg: format!("Update failed: {}", e),
-                                node_count: 0,
-                            });
-                        }
-                    }
+                    let result = subscriptions::SubscriptionManager::download_and_update(
+                        sub_id.clone(),
+                        sub_name,
+                        sub_url,
+                        is_active,
+                        mixed_port,
+                        profiles_dir,
+                    ).await;
+                    let _ = tx_sub.send(AppEvent::SubUpdated { sub_id, result });
                 });
             }
         }
@@ -686,13 +748,26 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
             if app.active_tab == ActiveTab::Subscriptions && !app.sub_mgr.subscriptions.is_empty() {
                 let total = app.sub_mgr.subscriptions.len();
                 app.set_status(format!("Updating all {} subscriptions...", total));
-                for idx in 0..total {
-                    let mut sub_mgr = app.sub_mgr.clone();
+                for sub in &app.sub_mgr.subscriptions {
+                    let sub_id = sub.id.clone();
+                    let sub_name = sub.name.clone();
+                    let sub_url = sub.url.clone();
+                    let is_active = sub.active;
+                    let mixed_port = app.mixed_port;
+                    let profiles_dir = app.sub_mgr.profiles_dir.clone();
+                    app.updating_subs.insert(sub_id.clone());
+
                     let tx_sub = tx.clone();
                     tokio::spawn(async move {
-                        if let Ok((msg, count)) = sub_mgr.update_subscription(idx).await {
-                            let _ = tx_sub.send(AppEvent::SubUpdated { msg, node_count: count });
-                        }
+                        let result = subscriptions::SubscriptionManager::download_and_update(
+                            sub_id.clone(),
+                            sub_name,
+                            sub_url,
+                            is_active,
+                            mixed_port,
+                            profiles_dir,
+                        ).await;
+                        let _ = tx_sub.send(AppEvent::SubUpdated { sub_id, result });
                     });
                 }
             }

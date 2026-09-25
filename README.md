@@ -90,58 +90,57 @@
 ./target/release/clash-tui -u http://127.0.0.1:9090 --secret your_secret
 ```
 
-### 安装为全局命令（任意终端直接运行 `clash-tui`）
+### 全局安装与一键配置自启
 
-以管理员不需要、无需手动改 PATH，运行根目录安装脚本即可：
+本项目的安装脚本已实现**全流程整合**：自动部署二进制、加入系统 PATH、并交互式提示是否开启开机静默自启（推荐），安装一次搞定。
 
+#### Windows 安装
+运行根目录安装脚本：
 ```powershell
-.\install.bat      # 复制二进制/内核/数据到 %LOCALAPPDATA%\clash-tui 并加入用户 PATH
+.\install.bat
 ```
+- 安装过程中会提示 `是否配置开机后台静默自启？[Y/n]`，直接按回车即可完成安装 + 开机自启。
+- 卸载只需：`.\install.bat --uninstall`
 
-重开一个终端后，在**任意目录**直接运行 `clash-tui`（可带 `-u` / `--secret` 参数）。
-数据与内核跟随安装目录（便携布局）；在项目目录内运行 `.\target\release\clash-tui.exe` 仍使用项目目录的数据。
-
-```powershell
-.\uninstall.bat    # 移除 PATH 条目，可选删除安装目录（含数据，会二次确认）
-```
-
-### 配置开机自启（后台静默接管，无黑框）
-
-推荐将 **Mihomo 内核守护进程** 配置为开机自启：系统登录后自动在后台静默运行代理（Windows 下支持 TUN 模式直接生效），无任何黑框或弹窗；日常需要调节点或测速时，随时在终端敲 `clash-tui` 或双击 `run.bat` 打开面板，退出终端（`q`）也不会中断后台网络代理。
-
-#### Windows 配置 (计划任务)
-
-- **一键开启**：双击运行根目录 [`autostart.bat`](autostart.bat)（自动请求管理员权限并注册 Windows 计划任务 `ClashTuiMihomo`，开机以最高权限静默启动）。
-- **一键取消**：双击运行根目录 [`unautostart.bat`](unautostart.bat)。
-- **手动命令**（管理员终端）：
-  ```powershell
-  schtasks /create /tn "ClashTuiMihomo" /tr "\"%LOCALAPPDATA%\clash-tui\bin\mihomo.exe\" -d \"%LOCALAPPDATA%\clash-tui\data\"" /sc onlogon /rl highest /f
-  schtasks /delete /tn "ClashTuiMihomo" /f
-  ```
-
-#### macOS / Linux 配置 (LaunchAgents / systemd)
-
-- **一键开启**：在终端运行 `bash autostart.sh`
-  - macOS：自动注册并加载 `~/Library/LaunchAgents/com.clash-tui.mihomo.plist`。
-  - Linux：自动配置并启用 `systemctl --user enable --now clash-tui-mihomo`。
-- **一键取消**：在终端运行 `bash unautostart.sh`。
-
-### macOS / Linux 安装
-
-**方式一：下载预编译发布包（推荐，免装 Rust）**
-从 GitHub Releases 下载对应架构的 `clash-tui-darwin-arm64.tar.gz`（Apple Silicon）或 `clash-tui-darwin-x64.tar.gz`（Intel）并解压：
+#### macOS / Linux 安装
+**方式一：下载预编译包（推荐，免装 Rust）**
+从 GitHub Releases 下载 `clash-tui-darwin-arm64.tar.gz`（Apple Silicon）或 `clash-tui-darwin-x64.tar.gz`（Intel）并解压：
 ```bash
 tar -xzvf clash-tui-darwin-arm64.tar.gz
 cd clash-tui-darwin-arm64
 bash install.sh
 ```
-若已包含可执行文件，`install.sh` 会直接完成安装，无需编译。
+安装过程中直接回车即可一键完成安装并配置开机自启。
 
 **方式二：源码编译安装**
-前置：安装 Rust（`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` 或 `brew install rust`），并将 Mihomo 内核（darwin 版）放在项目 `bin/mihomo`（`chmod +x bin/mihomo`）。然后：
 ```bash
 bash install.sh
 ```
+
+---
+
+### 开机自启与服务管理
+
+无论通过哪种方式安装，均可随时随地通过以下任一方式管理后台代理内核的开机自启：
+
+#### 方式 1：使用 `clash-tui` 原生命令行（推荐，跨平台通用）
+```bash
+clash-tui autostart status   # 查看当前自启状态
+clash-tui autostart on       # 开启开机静默自启
+clash-tui autostart off      # 关闭开机自启
+```
+
+#### 方式 2：使用统一安装脚本参数
+- **Windows**:
+  - `.\install.bat --autostart-on`：开启自启
+  - `.\install.bat --autostart-off`：关闭自启
+  - `.\install.bat --status`：查看状态
+  - `.\install.bat --uninstall`：完整卸载
+- **macOS / Linux**:
+  - `bash install.sh --autostart-on`：开启自启
+  - `bash install.sh --autostart-off`：关闭自启
+  - `bash install.sh --status`：查看状态
+  - `bash install.sh --uninstall`：完整卸载
 
 脚本自动完成：`cargo build --release` → 安装到 `~/.clash-tui/`（二进制 + 内核 + 数据）→ 创建全局命令 `clash-tui`（`/usr/local/bin` 可写时直接 symlink，否则 symlink 到 `~/.local/bin` 并自动写入 `~/.zshrc` 的 PATH）。卸载：`bash uninstall.sh`。
 

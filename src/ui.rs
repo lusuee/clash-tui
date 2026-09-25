@@ -552,6 +552,7 @@ fn render_subscriptions_tab(f: &mut Frame, app: &mut App, area: Rect) {
     let mut rows = Vec::new();
     for (idx, sub) in app.sub_mgr.subscriptions.iter().enumerate() {
         let is_selected = idx == app.selected_sub_idx;
+        let is_updating = app.updating_subs.contains(&sub.id);
         let row_style = if is_selected {
             Theme::selected_row_focused()
         } else {
@@ -565,14 +566,26 @@ fn render_subscriptions_tab(f: &mut Frame, app: &mut App, area: Rect) {
             (" ○ IDLE   ", Style::default().fg(Theme::MUTED))
         };
 
+        let node_cell = if is_updating && sub.node_count == 0 {
+            Span::styled("⟳ fetching...", Style::default().fg(Theme::SAPPHIRE))
+        } else {
+            Span::styled(
+                format!("◈ {} nodes", sub.node_count),
+                Style::default().fg(Theme::SAPPHIRE),
+            )
+        };
+
+        let sync_cell = if is_updating {
+            Span::styled("⟳ updating...", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(format!("󰅐 {}", sub.last_updated), Style::default().fg(Theme::MUTED))
+        };
+
         let cells = vec![
             Cell::from(Span::styled(format!("{}{}", pointer, active_badge), active_style)),
             Cell::from(format_display_name(&sub.name)),
-            Cell::from(Span::styled(
-                format!("◈ {} nodes", sub.node_count),
-                Style::default().fg(Theme::SAPPHIRE),
-            )),
-            Cell::from(Span::styled(format!("󰅐 {}", sub.last_updated), Style::default().fg(Theme::MUTED))),
+            Cell::from(node_cell),
+            Cell::from(sync_cell),
             Cell::from(Span::styled(sub.url.clone(), Style::default().fg(Theme::SUBTEXT0))),
         ];
         rows.push(Row::new(cells).style(row_style));
@@ -705,7 +718,7 @@ fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
 fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Length(9), Constraint::Min(4)])
+        .constraints([Constraint::Length(9), Constraint::Length(9), Constraint::Min(4)])
         .split(area);
 
     // Card 1: Mihomo Core Daemon Telemetry
@@ -730,6 +743,14 @@ fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled("[● ACTIVE RUNNING] Background Daemon", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD))
             } else {
                 Span::styled("[○ STOPPED / INACTIVE]", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD))
+            },
+        ]),
+        Line::from(vec![
+            Span::styled("◈ Autostart Service: ", Style::default().fg(Theme::SUBTEXT0)),
+            if app.core_mgr.is_autostart_enabled() {
+                Span::styled("[● ENABLED ] Active on system logon", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled("[○ DISABLED] Inactive (Run: clash-tui autostart on)", Style::default().fg(Theme::MUTED))
             },
         ]),
         Line::from(vec![

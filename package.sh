@@ -29,8 +29,8 @@ echo "[2/3] Collecting files into $DIST_DIR..."
 cp "$EXE" "$DIST_DIR/clash-tui"
 chmod +x "$DIST_DIR/clash-tui"
 
-# Copy helper scripts
-for f in install.sh uninstall.sh run.sh autostart.sh unautostart.sh env.sh unenv.sh README.md; do
+# Copy unified installer, runner, and documentation
+for f in install.sh run.sh README.md; do
   if [ -f "$f" ]; then
     cp "$f" "$DIST_DIR/"
   fi
