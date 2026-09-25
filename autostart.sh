@@ -8,17 +8,21 @@ OS="$(uname -s)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Resolve binary and data path (check local install first, then repo dir)
-if [ -f "$HOME/.clash-tui/bin/mihomo" ] && [ -d "$HOME/.clash-tui/data" ]; then
+if [ -f "$HOME/.clash-tui/bin/mihomo" ]; then
     CORE_EXE="$HOME/.clash-tui/bin/mihomo"
     DATA_DIR="$HOME/.clash-tui/data"
-elif [ -f "$SCRIPT_DIR/bin/mihomo" ] && [ -d "$SCRIPT_DIR/data" ]; then
+elif [ -f "$SCRIPT_DIR/bin/mihomo" ]; then
     CORE_EXE="$SCRIPT_DIR/bin/mihomo"
+    DATA_DIR="$SCRIPT_DIR/data"
+elif [ -f "$SCRIPT_DIR/bin/mihomo/mihomo" ]; then
+    CORE_EXE="$SCRIPT_DIR/bin/mihomo/mihomo"
     DATA_DIR="$SCRIPT_DIR/data"
 else
     echo "[ERROR] mihomo kernel binary not found."
     echo "        Make sure bin/mihomo exists or run 'bash install.sh' first."
     exit 1
 fi
+mkdir -p "$DATA_DIR"
 
 LOG_FILE="$DATA_DIR/mihomo.log"
 

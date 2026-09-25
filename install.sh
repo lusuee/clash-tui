@@ -49,6 +49,9 @@ if [ ! -f "$INSTALL_DIR/bin/mihomo" ]; then
   if [ -f bin/mihomo ]; then
     cp bin/mihomo "$INSTALL_DIR/bin/mihomo"
     chmod +x "$INSTALL_DIR/bin/mihomo"
+  elif [ -f bin/mihomo/mihomo ]; then
+    cp bin/mihomo/mihomo "$INSTALL_DIR/bin/mihomo"
+    chmod +x "$INSTALL_DIR/bin/mihomo"
   else
     echo "[WARNING] Mihomo kernel not found at bin/mihomo."
     echo "          Download it from https://github.com/MetaCubeX/mihomo/releases"

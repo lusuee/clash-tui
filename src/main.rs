@@ -828,6 +828,8 @@ fn resolve_working_dir() {
         .iter()
         .any(|f| std::path::Path::new(f).exists())
         || std::path::Path::new("bin").join("mihomo.exe").exists()
+        || std::path::Path::new("bin").join("mihomo").exists()
+        || std::path::Path::new("bin").join("mihomo").join("mihomo").exists()
         || std::path::Path::new("data").join("config.yaml").exists();
 
     if has_layout {

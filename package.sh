@@ -41,6 +41,10 @@ if [ -f "bin/mihomo" ]; then
   mkdir -p "$DIST_DIR/bin"
   cp "bin/mihomo" "$DIST_DIR/bin/"
   chmod +x "$DIST_DIR/bin/mihomo"
+elif [ -f "bin/mihomo/mihomo" ]; then
+  mkdir -p "$DIST_DIR/bin"
+  cp "bin/mihomo/mihomo" "$DIST_DIR/bin/mihomo"
+  chmod +x "$DIST_DIR/bin/mihomo"
 fi
 
 echo "[3/3] Creating archive: dist/${PACKAGE_NAME}.tar.gz..."

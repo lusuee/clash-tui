@@ -13,7 +13,13 @@ impl CoreManager {
         #[cfg(not(target_os = "windows"))]
         let bin_name = "mihomo";
 
-        let bin_path = Path::new("bin").join(bin_name);
+        let primary_path = Path::new("bin").join(bin_name);
+        let nested_path = Path::new("bin").join("mihomo").join(bin_name);
+        let bin_path = if !primary_path.is_file() && nested_path.is_file() {
+            nested_path
+        } else {
+            primary_path
+        };
         let data_dir = PathBuf::from("data");
 
         let _ = std::fs::create_dir_all("bin");
@@ -23,7 +29,7 @@ impl CoreManager {
     }
 
     pub fn is_installed(&self) -> bool {
-        self.bin_path.exists()
+        self.bin_path.is_file()
     }
 
     pub async fn is_running(&self, api_url: &str, secret: Option<&str>) -> bool {
