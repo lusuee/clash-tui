@@ -42,14 +42,14 @@ jobs:
             archive_type: zip
           # Linux x64
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             bin_name: clash-tui
             archive_prefix: clash-tui-linux-x64
             archive_type: tar.gz
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -57,7 +57,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install Linux dependencies
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
@@ -102,7 +102,7 @@ jobs:
           "$hash  $archive" | Out-File -Encoding ascii "${archive}.sha256"
 
       - name: Upload build archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.archive_prefix }}
           path: |
@@ -112,13 +112,13 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
@@ -136,7 +136,7 @@ jobs:
           fi
 
       - name: Create or update Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.vars.outputs.tag }}
           name: Clash TUI ${{ steps.vars.outputs.tag }}
