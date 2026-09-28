@@ -70,96 +70,71 @@
 
 ---
 
-## 运行与构建
+## 运行与使用（纯单二进制设计）
 
-### 直接运行
+本项目已全面消除所有外部脚本依赖。所有功能（图形界面、全局环境变量配置、开机自启、服务管理）均由单一原生可执行文件 `clash-tui` 原生提供。
 
-若已有编译产物或预编译发布包：
+### 1. 直接运行
 
-**Windows**：双击根目录 `run.bat` 或在终端运行：
-```powershell
-.\run.bat
-# 或直接运行二进制
-.\target\release\clash-tui.exe -u http://127.0.0.1:9090 --secret your_secret
-```
+- **Windows**：直接在文件管理器中**双击 `clash-tui.exe`** 即可在终端窗口中秒级打开；或在终端中运行：
+  ```powershell
+  .\clash-tui.exe
+  # 或指定远程 controller 与 secret
+  .\clash-tui.exe -u http://127.0.0.1:9090 --secret your_secret
+  ```
+- **macOS / Linux**：
+  ```bash
+  ./clash-tui
+  ```
 
-**macOS / Linux**：在终端运行根目录 `run.sh`：
+---
+
+### 2. 全局安装（自动配置环境变量 PATH）
+
+无需手动编辑系统 PATH。在任意解压位置运行 `install` 命令：
+
 ```bash
-./run.sh
-# 或直接运行二进制
-./target/release/clash-tui -u http://127.0.0.1:9090 --secret your_secret
+# 自动将当前目录写入系统/用户 PATH，即刻支持全局命令
+clash-tui install
+
+# 或一步到位：配置全局 PATH + 启用开机后台静默自启
+clash-tui install --autostart
 ```
 
-### 全局安装与一键配置自启
+安装完成后，打开一个**新终端**，即可在任意工作目录下敲 `clash-tui` 使用。
 
-本项目的安装脚本已实现**全流程整合**：自动部署二进制、加入系统 PATH、并交互式提示是否开启开机静默自启（推荐），安装一次搞定。
+- **卸载**：
+  ```bash
+  clash-tui uninstall
+  ```
+  自动从 PATH 中移除，并清理相关的开机自启计划任务或后台服务。
 
-#### Windows 安装
-运行根目录安装脚本：
-```powershell
-.\install.bat
-```
-- 安装过程中会提示 `是否配置开机后台静默自启？[Y/n]`，直接按回车即可完成安装 + 开机自启。
-- 卸载只需：`.\install.bat --uninstall`
+---
 
-#### macOS / Linux 安装
-**方式一：下载预编译包（推荐，免装 Rust）**
-从 GitHub Releases 下载 `clash-tui-darwin-arm64.tar.gz`（Apple Silicon）或 `clash-tui-darwin-x64.tar.gz`（Intel）并解压：
+### 3. 开机自启服务管理（静默接管，无黑框）
+
+Mihomo 内核可在开机或登录后由系统自动拉起并在后台静默代理，开机即用，零黑框弹窗。日常需要调节点或测速时，随时敲 `clash-tui` 打开控制面板，退出终端（`q`）也不会中断后台网络：
+
 ```bash
-tar -xzvf clash-tui-darwin-arm64.tar.gz
-cd clash-tui-darwin-arm64
-bash install.sh
-```
-安装过程中直接回车即可一键完成安装并配置开机自启。
+# 查看当前自启状态
+clash-tui autostart status
 
-**方式二：源码编译安装**
-```bash
-bash install.sh
+# 开启开机静默自启（Windows 自动 UAC 提权并以无黑框静默运行）
+clash-tui autostart on
+
+# 关闭开机自启
+clash-tui autostart off
 ```
 
 ---
 
-### 开机自启与服务管理
+### 4. 本地重新编译
 
-无论通过哪种方式安装，均可随时随地通过以下任一方式管理后台代理内核的开机自启：
-
-#### 方式 1：使用 `clash-tui` 原生命令行（推荐，跨平台通用）
 ```bash
-clash-tui autostart status   # 查看当前自启状态
-clash-tui autostart on       # 开启开机静默自启
-clash-tui autostart off      # 关闭开机自启
+cargo build --release
 ```
 
-#### 方式 2：使用统一安装脚本参数
-- **Windows**:
-  - `.\install.bat --autostart-on`：开启自启
-  - `.\install.bat --autostart-off`：关闭自启
-  - `.\install.bat --status`：查看状态
-  - `.\install.bat --uninstall`：完整卸载
-- **macOS / Linux**:
-  - `bash install.sh --autostart-on`：开启自启
-  - `bash install.sh --autostart-off`：关闭自启
-  - `bash install.sh --status`：查看状态
-  - `bash install.sh --uninstall`：完整卸载
-
-脚本自动完成：`cargo build --release` → 安装到 `~/.clash-tui/`（二进制 + 内核 + 数据）→ 创建全局命令 `clash-tui`（`/usr/local/bin` 可写时直接 symlink，否则 symlink 到 `~/.local/bin` 并自动写入 `~/.zshrc` 的 PATH）。卸载：`bash uninstall.sh`。
-
-> macOS 下系统代理通过 `networksetup` 自动切换、环境变量代理写入 `~/.clash_env.sh` + `launchctl`；TUN 模式需要以 `sudo` 运行内核。
-
-### 本地编译与打包
-
-- **仅重新编译**：
-  ```bash
-  cargo build --release
-  ```
-- **一键打包为发布压缩包 (.tar.gz)**：
-  ```bash
-  bash package.sh
-  ```
-  产物将生成在 `dist/clash-tui-<os>-<arch>.tar.gz`。
-
-- **GitHub Actions 云端自动构建**：
-  已配置 `.github/workflows/release.yml`。每次推送 `v*` 格式标签（如 `git tag v0.1.0 && git push origin v0.1.0`）或在 GitHub Actions 页面手动点击触发，GitHub 将自动编译 macOS (Apple Silicon / Intel)、Windows、Linux 对应版本的原生可执行压缩包并自动发布到 GitHub Releases。
+- **GitHub Actions 云端自动构建**：已配置 `.github/workflows/release.yml`。推送 `v*` 格式标签（如 `git tag v0.1.0 && git push origin v0.1.0`）时，GitHub 将自动为 macOS、Windows、Linux 构建原生可执行文件。
 
 ---
 
@@ -167,31 +142,23 @@ clash-tui autostart off      # 关闭开机自启
 
 ```
 clash-tui/
-├── src/                  # 全部 Rust 源码（单二进制）
-│   ├── main.rs          # 异步主事件循环、键盘交互、后台任务监听
-│   ├── app.rs           # 核心应用状态机、焦点管理、流量历史队列
-│   ├── ui.rs            # Ratatui 现代界面渲染器、Sparkline 流量波形、弹窗
-│   ├── theme.rs         # Cyber Neon HUD 调色板与组件样式定义
-│   ├── envproxy.rs      # 跨平台环境变量代理 (Windows 注册表 + Shell 脚本生成)
-│   ├── sysproxy.rs      # 跨平台 (Windows WinINet / macOS networksetup) 系统代理切换
-│   ├── core.rs          # 跨平台 (Windows/macOS) 内核守护进程管理与 UAC 提权
-│   ├── subscriptions.rs # 订阅增删改查、YAML/Base64 解析、配置热更新
-│   ├── rules.rs         # 自定义代理域名规则持久化、解析与 YAML 注入
-│   └── api.rs           # Mihomo RESTful 控制器交互客户端 (TUN/Port/Proxy)
-├── env.nu / unenv.nu    # Nushell 代理环境变量即时加载 / 清除脚本
-├── env.bat / unenv.bat  # CMD 代理环境变量即时加载 / 清除脚本
-├── env.ps1 / unenv.ps1  # PowerShell 代理环境变量即时加载 / 清除脚本
-├── bin/                 # Mihomo 内核放置目录 (mihomo.exe / mihomo)
-├── data/                # 内核配置 (config.yaml) 与运行日志 (mihomo.log)
-├── profiles/            # 本地订阅配置存档 (.yaml)
-├── subscriptions.json   # 订阅元数据存档
-├── rules.json           # 自定义代理域名规则存档
-├── run.bat              # 便捷启动脚本
-├── autostart.bat        # 一键配置开机后台静默自启（Windows 计划任务）
-├── unautostart.bat      # 一键取消 Windows 开机自启
-├── autostart.sh         # 一键配置开机后台自启（macOS LaunchAgents / Linux systemd）
-├── unautostart.sh       # 一键取消 macOS / Linux 开机自启
-├── install.bat          # 全局安装到用户 PATH（任意终端运行 clash-tui）
-├── uninstall.bat        # 卸载全局安装
-└── Cargo.toml           # Rust 项目清单
+├── clash-tui.exe / clash-tui # 原生编译可执行程序（单二进制）
+├── bin/                      # Mihomo 内核放置目录 (mihomo.exe / mihomo)
+├── data/                     # 内核配置 (config.yaml) 与运行日志 (mihomo.log)
+├── profiles/                 # 本地订阅配置存档 (.yaml)
+├── subscriptions.json        # 订阅元数据存档
+├── rules.json                # 自定义代理域名规则存档
+├── src/                      # 全部 Rust 源码
+│   ├── main.rs               # 异步主事件循环、键盘交互、CLI 命令分发
+│   ├── app.rs                # 核心应用状态机、焦点管理、流量历史队列
+│   ├── ui.rs                 # Ratatui 现代界面渲染器、Sparkline 流量波形
+│   ├── theme.rs              # Cyber Neon HUD 调色板与组件样式定义
+│   ├── installer.rs          # 纯原生跨平台环境变量 PATH 配置与卸载
+│   ├── envproxy.rs           # 跨平台环境变量代理 (Windows 注册表 + Shell 脚本生成)
+│   ├── sysproxy.rs           # 跨平台系统代理切换 (WinINet / networksetup)
+│   ├── core.rs               # 内核进程管理、静默自启引导与 UAC 提权
+│   ├── subscriptions.rs      # 订阅增删改查、YAML 解析、配置热更新
+│   ├── rules.rs              # 自定义代理域名规则持久化与注入
+│   └── api.rs                # Mihomo RESTful 控制器交互客户端
+└── Cargo.toml                # Rust 项目清单
 ```

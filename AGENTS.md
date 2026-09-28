@@ -13,9 +13,10 @@
 ```powershell
 cargo check                    # 类型检查（快速反馈）
 cargo build --release          # 构建 target/release/clash-tui.exe
-.\run.bat                      # 运行（可附 -u <api-url> --secret <secret>）
-.\install.bat                  # 全局安装到 %LOCALAPPDATA%\clash-tui + 用户 PATH
-.\uninstall.bat                # 卸载（移除 PATH，删数据前会确认）
+.\target\release\clash-tui.exe # 运行（可附 -u <api-url> --secret <secret>）
+clash-tui install              # 全局安装到用户 PATH（可选 --autostart）
+clash-tui autostart <on|off>   # 管理开机自启
+clash-tui uninstall            # 卸载（移除 PATH，清理自启服务）
 ```
 
 无测试框架。验证标准见文末「完成定义」。
@@ -26,11 +27,12 @@ cargo build --release          # 构建 target/release/clash-tui.exe
 
 | 需求 | 去哪改 |
 |---|---|
-| 键盘按键、事件分发 | `src/main.rs`（`handle_key_event`，模态分支在函数顶部优先处理） |
+| 键盘按键、事件分发、CLI命令 | `src/main.rs`（`handle_key_event`，模态分支在函数顶部优先处理） |
 | Tab/光标/状态/弹窗数据模型 | `src/app.rs`（`App`、`ActiveTab`、导航方法） |
 | 界面渲染 | `src/ui.rs`（`render` 分发 + `render_*_tab/modal`，纯渲染无 I/O） |
 | REST 调用 | `src/api.rs`（`ClashClient`，可 Clone 进 tokio task） |
-| 内核进程启停/UAC 提权 | `src/core.rs` |
+| 全局安装/PATH管理 | `src/installer.rs`（纯原生注册/注销 PATH） |
+| 内核进程启停/开机自启/UAC 提权 | `src/core.rs`（静默 VBS + 计划任务/LaunchAgents/systemd） |
 | 订阅下载/激活/生效配置写入 | `src/subscriptions.rs` |
 | 自定义代理域名规则 | `src/rules.rs`（持久化 rules.json + YAML 注入） |
 | 系统代理/环境变量代理 | `src/sysproxy.rs` / `src/envproxy.rs` |

@@ -23,3 +23,7 @@ clash-tui.exe
 # macOS
 .DS_Store
 
+# Generated runtime helper scripts
+env.*
+unenv.*
+*.vbs

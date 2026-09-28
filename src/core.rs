@@ -216,10 +216,13 @@ impl CoreManager {
     }
 
     pub fn enable_autostart(&self) -> Result<String, String> {
+        #[allow(unused_variables)]
         let abs_bin = std::fs::canonicalize(&self.bin_path)
             .unwrap_or_else(|_| self.bin_path.clone());
+        #[allow(unused_variables)]
         let abs_data = std::fs::canonicalize(&self.data_dir)
             .unwrap_or_else(|_| self.data_dir.clone());
+        #[allow(unused_variables)]
         let log_file = abs_data.join("mihomo.log");
 
         #[cfg(target_os = "macos")]
@@ -282,16 +285,76 @@ impl CoreManager {
 
         #[cfg(target_os = "windows")]
         {
-            let task_run = format!("\"{}\" -d \"{}\"", abs_bin.display(), abs_data.display());
-            let output = std::process::Command::new("schtasks")
-                .args(["/create", "/tn", "ClashTuiMihomo", "/tr", &task_run, "/sc", "onlogon", "/rl", "highest", "/f"])
-                .output()
-                .map_err(|e| format!("Failed to execute schtasks: {}", e))?;
+            use base64::Engine;
 
-            if output.status.success() {
-                Ok("Autostart service enabled (Windows Scheduled Task: ClashTuiMihomo)".to_string())
+            if !self.bin_path.exists() {
+                return Err(format!(
+                    "Mihomo binary not found at {:?}. Please place mihomo.exe in the 'bin' directory.",
+                    self.bin_path
+                ));
+            }
+
+            self.ensure_default_config();
+
+            let abs_bin = std::fs::canonicalize(&self.bin_path).unwrap_or_else(|_| self.bin_path.clone());
+            let abs_data = std::fs::canonicalize(&self.data_dir).unwrap_or_else(|_| self.data_dir.clone());
+            let clean_bin = clean_windows_path(&abs_bin);
+            let clean_data = clean_windows_path(&abs_data);
+
+            // Write silent_start.vbs to launch Mihomo completely hidden (no console black window on boot)
+            let vbs_path = self.bin_path.parent().unwrap_or(Path::new("bin")).join("silent_start.vbs");
+            let vbs_content = format!(
+                "Dim WshShell\r\nSet WshShell = CreateObject(\"WScript.Shell\")\r\nWshShell.Run chr(34) & \"{}\" & chr(34) & \" -d \" & chr(34) & \"{}\" & chr(34), 0, False\r\n",
+                clean_bin,
+                clean_data
+            );
+            // Write strictly as ASCII bytes without UTF-8 BOM to prevent Windows Script Host error 800A0408
+            std::fs::write(&vbs_path, vbs_content.as_bytes())
+                .map_err(|e| format!("Failed to write silent_start.vbs: {}", e))?;
+
+            let abs_vbs = std::fs::canonicalize(&vbs_path).unwrap_or_else(|_| vbs_path.clone());
+            let clean_vbs = clean_windows_path(&abs_vbs);
+            let work_dir = clean_windows_path(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+
+            // Use PowerShell ScheduledTask cmdlets encoded in base64 to avoid quoting issues
+            let ps_script = format!(
+                "$Action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument '\"{}\"' -WorkingDirectory '{}'\n\
+                 $Trigger = New-ScheduledTaskTrigger -AtLogOn\n\
+                 $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest\n\
+                 $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries\n\
+                 Register-ScheduledTask -TaskName 'ClashTuiMihomo' -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings -Force",
+                clean_vbs,
+                work_dir
+            );
+
+            let utf16: Vec<u8> = ps_script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&utf16);
+
+            // 1. Try directly (works if already running as Admin)
+            let direct_out = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-EncodedCommand", &b64])
+                .output();
+
+            if let Ok(ref o) = direct_out {
+                if o.status.success() && self.is_autostart_enabled() {
+                    return Ok("Autostart scheduled task created (Windows: ClashTuiMihomo, silent background mode)".to_string());
+                }
+            }
+
+            // 2. If non-admin, request UAC elevation
+            println!("[提示] 注册最高权限计划任务需要管理员权限，正在请求 UAC 提权...");
+            let elevate_cmd = format!(
+                "Start-Process powershell -ArgumentList '-NoProfile', '-EncodedCommand', '{}' -Verb RunAs -Wait",
+                b64
+            );
+            let _ = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", &elevate_cmd])
+                .output();
+
+            if self.is_autostart_enabled() {
+                Ok("Autostart scheduled task created via UAC elevation (ClashTuiMihomo, silent background mode)".to_string())
             } else {
-                Err("Failed to create scheduled task. Try running as Administrator.".to_string())
+                Err("Failed to create scheduled task. Administrator permission was denied or failed.".to_string())
             }
         }
 
@@ -364,13 +427,29 @@ WantedBy=default.target
         {
             let output = std::process::Command::new("schtasks")
                 .args(["/delete", "/tn", "ClashTuiMihomo", "/f"])
-                .output()
-                .map_err(|e| format!("Failed to execute schtasks: {}", e))?;
+                .output();
 
-            if output.status.success() {
-                Ok("Autostart service disabled (Scheduled task removed)".to_string())
+            let success = match output {
+                Ok(ref o) => o.status.success(),
+                Err(_) => false,
+            };
+
+            if !success {
+                let ps_cmd = "Start-Process schtasks -ArgumentList '/delete /tn ClashTuiMihomo /f' -Verb RunAs -Wait";
+                let _ = std::process::Command::new("powershell")
+                    .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd])
+                    .output();
+            }
+
+            let vbs_path = self.bin_path.parent().unwrap_or(Path::new("bin")).join("silent_start.vbs");
+            if vbs_path.exists() {
+                let _ = std::fs::remove_file(vbs_path);
+            }
+
+            if !self.is_autostart_enabled() {
+                Ok("Autostart scheduled task removed (ClashTuiMihomo)".to_string())
             } else {
-                Ok("Autostart service is not currently enabled".to_string())
+                Err("Failed to remove scheduled task. Administrator permission was denied or failed.".to_string())
             }
         }
 
@@ -393,3 +472,14 @@ WantedBy=default.target
         }
     }
 }
+
+#[cfg(target_os = "windows")]
+fn clean_windows_path<P: AsRef<std::path::Path>>(path: P) -> String {
+    let s = path.as_ref().to_string_lossy().to_string();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        stripped.to_string()
+    } else {
+        s
+    }
+}
+

@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod core;
 mod envproxy;
+mod installer;
 mod rules;
 mod subscriptions;
 mod sysproxy;
@@ -42,6 +43,21 @@ pub enum AppEvent {
     PortChanged(Result<u16, String>),
 }
 
+fn print_help() {
+    println!("Clash TUI - Modern Cross-Platform Mihomo/Clash Terminal Client");
+    println!();
+    println!("Usage:");
+    println!("  clash-tui [OPTIONS]                 Launch interactive TUI (or double-click clash-tui.exe)");
+    println!("  clash-tui install [-a|--autostart]  Add clash-tui to User PATH (optional: enable autostart)");
+    println!("  clash-tui uninstall                 Remove clash-tui from PATH and cleanup autostart");
+    println!("  clash-tui autostart <on|off|status> Manage background kernel autostart on boot");
+    println!();
+    println!("Options:");
+    println!("  -u, --url <URL>        Clash REST API URL (default: http://127.0.0.1:9090)");
+    println!("      --secret <SECRET>  Clash external controller secret");
+    println!("  -h, --help             Show this help information");
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Parse arguments
@@ -51,6 +67,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {
         match args[1].as_str() {
+            "install" => {
+                resolve_working_dir();
+                let autostart = args.iter().any(|a| a == "-a" || a == "--autostart");
+                match installer::install(autostart) {
+                    Ok(msg) => println!("✔ {}", msg),
+                    Err(e) => eprintln!("✘ {}", e),
+                }
+                return Ok(());
+            }
+            "uninstall" => {
+                resolve_working_dir();
+                match installer::uninstall() {
+                    Ok(msg) => println!("✔ {}", msg),
+                    Err(e) => eprintln!("✘ {}", e),
+                }
+                return Ok(());
+            }
             "autostart" => {
                 resolve_working_dir();
                 let core_mgr = CoreManager::new();
@@ -78,6 +111,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return Ok(());
             }
+            "-h" | "--help" | "help" => {
+                print_help();
+                return Ok(());
+            }
             _ => {}
         }
     }
@@ -98,17 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "-h" | "--help" => {
-                println!("Clash TUI - Modern Cross-Platform Mihomo/Clash Terminal Client");
-                println!();
-                println!("Usage: clash-tui [OPTIONS] [COMMAND]");
-                println!();
-                println!("Commands:");
-                println!("  autostart <on|off|status>  Manage background kernel autostart");
-                println!();
-                println!("Options:");
-                println!("  -u, --url <URL>        Clash REST API URL (default: http://127.0.0.1:9090)");
-                println!("      --secret <SECRET>  Clash external controller secret");
-                println!("  -h, --help             Show help information");
+                print_help();
                 return Ok(());
             }
             _ => {}

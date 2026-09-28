@@ -8,7 +8,7 @@ use winreg::enums::*;
 use winreg::RegKey;
 
 #[cfg(target_os = "windows")]
-mod winuser {
+pub mod winuser {
     const HWND_BROADCAST: *mut std::ffi::c_void = 0xffff as *mut std::ffi::c_void;
     const WM_SETTINGCHANGE: u32 = 0x001a;
     const SMTO_ABORTIFHUNG: u32 = 0x0002;
