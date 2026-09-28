@@ -14,8 +14,13 @@ impl CoreManager {
         let bin_name = "mihomo";
 
         let primary_path = Path::new("bin").join(bin_name);
+        let direct_path = PathBuf::from(bin_name);
         let nested_path = Path::new("bin").join("mihomo").join(bin_name);
-        let bin_path = if !primary_path.is_file() && nested_path.is_file() {
+        let bin_path = if primary_path.is_file() {
+            primary_path
+        } else if direct_path.is_file() {
+            direct_path
+        } else if nested_path.is_file() {
             nested_path
         } else {
             primary_path

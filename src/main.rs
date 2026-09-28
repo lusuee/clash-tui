@@ -929,6 +929,8 @@ fn resolve_working_dir() {
     let has_layout = ["subscriptions.json", "rules.json"]
         .iter()
         .any(|f| std::path::Path::new(f).exists())
+        || std::path::Path::new("mihomo.exe").exists()
+        || std::path::Path::new("mihomo").exists()
         || std::path::Path::new("bin").join("mihomo.exe").exists()
         || std::path::Path::new("bin").join("mihomo").exists()
         || std::path::Path::new("bin").join("mihomo").join("mihomo").exists()
