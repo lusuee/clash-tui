@@ -217,6 +217,24 @@ pub fn deploy_config_yaml(profile_content: &str, mixed_port: u16) -> Result<(), 
                 serde_yaml::Value::String("mixed-port".to_string()),
                 serde_yaml::Value::Number(mixed_port.into()),
             );
+
+            // 确保开机自启与部署订阅配置时默认不启用 TUN 模式
+            let tun_key = serde_yaml::Value::String("tun".to_string());
+            if let Some(tun_val) = map.get_mut(&tun_key) {
+                if let Some(tun_map) = tun_val.as_mapping_mut() {
+                    tun_map.insert(
+                        serde_yaml::Value::String("enable".to_string()),
+                        serde_yaml::Value::Bool(false),
+                    );
+                }
+            } else {
+                let mut tun_map = serde_yaml::Mapping::new();
+                tun_map.insert(
+                    serde_yaml::Value::String("enable".to_string()),
+                    serde_yaml::Value::Bool(false),
+                );
+                map.insert(tun_key, serde_yaml::Value::Mapping(tun_map));
+            }
         }
         if let Ok(modified_yaml) = serde_yaml::to_string(&yaml_val) {
             fs::write(&config_dest, modified_yaml)

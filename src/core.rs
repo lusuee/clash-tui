@@ -69,8 +69,54 @@ impl CoreManager {
                                 mode: rule\n\
                                 log-level: info\n\
                                 external-controller: 127.0.0.1:9090\n\
-                                secret: ''\n";
+                                secret: ''\n\
+                                tun:\n\
+                                  enable: false\n";
             let _ = std::fs::write(&config_path, default_yaml);
+        } else {
+            Self::ensure_tun_disabled_in_config(&config_path);
+        }
+    }
+
+    pub fn ensure_tun_disabled_in_config(config_path: &Path) {
+        if !config_path.exists() {
+            return;
+        }
+        if let Ok(content) = std::fs::read_to_string(config_path) {
+            if let Ok(mut yaml_val) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                let mut modified = false;
+                if let Some(map) = yaml_val.as_mapping_mut() {
+                    let tun_key = serde_yaml::Value::String("tun".to_string());
+                    if let Some(tun_val) = map.get_mut(&tun_key) {
+                        if let Some(tun_map) = tun_val.as_mapping_mut() {
+                            let enable_key = serde_yaml::Value::String("enable".to_string());
+                            if let Some(enable_val) = tun_map.get_mut(&enable_key) {
+                                if enable_val.as_bool() != Some(false) {
+                                    *enable_val = serde_yaml::Value::Bool(false);
+                                    modified = true;
+                                }
+                            } else {
+                                tun_map.insert(enable_key, serde_yaml::Value::Bool(false));
+                                modified = true;
+                            }
+                        }
+                    } else {
+                        let mut tun_map = serde_yaml::Mapping::new();
+                        tun_map.insert(
+                            serde_yaml::Value::String("enable".to_string()),
+                            serde_yaml::Value::Bool(false),
+                        );
+                        map.insert(tun_key, serde_yaml::Value::Mapping(tun_map));
+                        modified = true;
+                    }
+                }
+                if modified {
+                    if let Ok(out) = serde_yaml::to_string(&yaml_val) {
+                        let _ = std::fs::write(config_path, out);
+                        crate::rules::apply_rules_to_config();
+                    }
+                }
+            }
         }
     }
 
@@ -160,6 +206,7 @@ impl CoreManager {
     pub fn start_core_as_admin(&self) -> Result<String, String> {
         let _ = self.stop_core();
         std::thread::sleep(Duration::from_millis(500));
+        self.ensure_default_config();
 
         #[cfg(target_os = "windows")]
         {

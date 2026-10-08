@@ -148,6 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Ensure Mihomo Core daemon is active
     let core_mgr = CoreManager::new();
+    core_mgr.ensure_default_config();
     let is_running = core_mgr.is_running(&api_url, secret.as_deref()).await;
     if !is_running && core_mgr.is_installed() {
         let _ = core_mgr.start_core();
