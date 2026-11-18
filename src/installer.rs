@@ -4,6 +4,8 @@ use std::path::PathBuf;
 pub fn install(autostart: bool) -> Result<String, String> {
     let exe_path = std::env::current_exe().map_err(|e| format!("Failed to get current executable path: {}", e))?;
     let exe_dir = exe_path.parent().ok_or("Cannot determine parent directory of executable")?;
+    // 仅 Windows 分支使用 exe_dir_str；非 Windows 下保留校验、不参与后续逻辑
+    #[allow(unused_variables)]
     let exe_dir_str = exe_dir.to_str().ok_or("Invalid UTF-8 in executable path")?;
 
     #[cfg(target_os = "windows")]
@@ -107,6 +109,8 @@ pub fn install(autostart: bool) -> Result<String, String> {
 pub fn uninstall() -> Result<String, String> {
     let exe_path = std::env::current_exe().map_err(|e| format!("Failed to get current executable path: {}", e))?;
     let exe_dir = exe_path.parent().ok_or("Cannot determine parent directory of executable")?;
+    // 仅 Windows 分支使用 exe_dir_str；非 Windows 下保留校验、不参与后续逻辑
+    #[allow(unused_variables)]
     let exe_dir_str = exe_dir.to_str().ok_or("Invalid UTF-8 in executable path")?;
 
     let mut output_msgs = Vec::new();
