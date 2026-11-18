@@ -7,12 +7,17 @@ pub struct CoreManager {
 }
 
 impl CoreManager {
-    pub fn new() -> Self {
-        #[cfg(target_os = "windows")]
-        let bin_name = "mihomo.exe";
-        #[cfg(not(target_os = "windows"))]
-        let bin_name = "mihomo";
+    #[cfg(target_os = "windows")]
+    const BIN_NAME: &'static str = "mihomo.exe";
+    #[cfg(not(target_os = "windows"))]
+    const BIN_NAME: &'static str = "mihomo";
 
+    pub fn new() -> Self {
+        let bin_name = Self::BIN_NAME;
+
+        // 优先使用当前工作目录（便携布局 / 开发目录）中的内核；
+        // 若 cwd 中没有，则回退到 clash-tui 可执行文件旁边的 bin/：
+        // cwd 只是用户随手打开终端的目录时，不应因此误报“找不到 mihomo”。
         let primary_path = Path::new("bin").join(bin_name);
         let direct_path = PathBuf::from(bin_name);
         let nested_path = Path::new("bin").join("mihomo").join(bin_name);
@@ -23,7 +28,7 @@ impl CoreManager {
         } else if nested_path.is_file() {
             nested_path
         } else {
-            primary_path
+            Self::kernel_next_to_exe().unwrap_or(primary_path)
         };
         let data_dir = PathBuf::from("data");
 
@@ -35,6 +40,40 @@ impl CoreManager {
 
     pub fn is_installed(&self) -> bool {
         self.bin_path.is_file()
+    }
+
+    /// 在 clash-tui 可执行文件所在目录中查找内核（`mihomo`、`bin/mihomo`、`bin/mihomo/mihomo`）。
+    /// 返回绝对路径，供 cwd 中缺少内核时兜底使用。
+    pub fn kernel_next_to_exe() -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+        let dir = exe.parent()?;
+        [
+            dir.join(Self::BIN_NAME),
+            dir.join("bin").join(Self::BIN_NAME),
+            dir.join("bin").join("mihomo").join(Self::BIN_NAME),
+        ]
+        .into_iter()
+        .find(|p| p.is_file())
+    }
+
+    /// 内核缺失时的可操作提示：告诉用户实际查找过的位置。
+    pub fn missing_hint(&self) -> String {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let install_dir = exe_dir
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|| "<安装目录>".to_string());
+        format!(
+            "未找到 Mihomo 内核（已查找 {} 与 {}/bin/{}）；请将内核放到 {}/bin/{} 并执行 chmod +x",
+            self.bin_path.display(),
+            install_dir,
+            Self::BIN_NAME,
+            install_dir,
+            Self::BIN_NAME
+        )
     }
 
     pub async fn is_running(&self, api_url: &str, secret: Option<&str>) -> bool {
@@ -122,7 +161,7 @@ impl CoreManager {
 
     pub fn start_core(&self) -> Result<String, String> {
         if !self.is_installed() {
-            return Err(format!("Mihomo binary not found at {:?}", self.bin_path));
+            return Err(self.missing_hint());
         }
 
         self.ensure_default_config();

@@ -47,7 +47,7 @@ clash-tui uninstall            # 卸载（移除 PATH，清理自启服务）
 4. **YAML 操作用 `serde_yaml::Value`**：注入字段（external-controller、mixed-port、rules）而非重建结构，保留订阅其余内容。
 5. **状态提示**：成功前缀 `✔`、失败前缀 `✘`（`app.set_status()`），TUI 中可混用中英文。
 6. **gitignore 文件禁提交**：`bin/`、`data/`、`profiles/`、`subscriptions.json`、`rules.json`、`target/`（订阅 URL 与规则含用户隐私）。
-7. **路径全部相对 cwd**（`bin/`、`data/`、`profiles/`、两个 json），正确性由 `main()` 开头的 `resolve_working_dir()`（main.rs）保证：cwd 有数据则用 cwd，否则切到 exe 目录（便携全局安装）。勿在模块中自行引入绝对路径或绕过该机制。
+7. **路径全部相对 cwd**（`bin/`、`data/`、`profiles/`、两个 json），正确性由 `main()` 开头的 `resolve_working_dir()`（main.rs）保证：**cwd 里确实存在内核（`mihomo` / `bin/mihomo` / `bin/mihomo/mihomo`）才留在 cwd**，否则切到 exe 所在的安装目录（便携全局安装）。判定「是数据目录」只认内核二进制，不得把 `data/config.yaml`、`rules.json` 等本程序自己生成的产物当证据——否则任何被误启动一次的空目录都会永久劫持工作目录，表现为永远提示找不到 mihomo。`core.rs` 仅在 cwd 无内核时以 exe 目录为兜底，勿在模块中另行引入绝对路径或绕过该机制。
 
 ## 环境坑（重要）
 

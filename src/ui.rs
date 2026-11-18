@@ -728,11 +728,22 @@ fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Theme::inactive_border());
 
+    let mut binary_line = vec![
+        Span::styled("◈ Binary Image:      ", Style::default().fg(Theme::SUBTEXT0)),
+        Span::styled(
+            absolute_path_display(&app.core_mgr.bin_path),
+            Style::default().fg(Theme::TEXT),
+        ),
+    ];
+    if !app.core_mgr.is_installed() {
+        binary_line.push(Span::styled(
+            "  [✘ MISSING]",
+            Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD),
+        ));
+    }
+
     let core_lines = vec![
-        Line::from(vec![
-            Span::styled("◈ Binary Image:      ", Style::default().fg(Theme::SUBTEXT0)),
-            Span::styled(app.core_mgr.bin_path.to_string_lossy(), Style::default().fg(Theme::TEXT)),
-        ]),
+        Line::from(binary_line),
         Line::from(vec![
             Span::styled("◈ Engine Version:    ", Style::default().fg(Theme::SUBTEXT0)),
             Span::styled(format!("Mihomo {}", app.core_version), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
@@ -1022,6 +1033,17 @@ fn render_edit_port_modal(f: &mut Frame, port_input: &str) {
         Span::raw("Dismiss"),
     ]);
     f.render_widget(Paragraph::new(action_hints).alignment(Alignment::Center), chunks[2]);
+}
+
+/// 把相对路径（相对于当前工作目录）显示为绝对路径，便于用户确认内核/配置到底在哪。
+fn absolute_path_display(p: &std::path::Path) -> String {
+    if p.is_absolute() {
+        return p.to_string_lossy().to_string();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(p).to_string_lossy().to_string(),
+        Err(_) => p.to_string_lossy().to_string(),
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

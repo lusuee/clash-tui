@@ -240,6 +240,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 5. Application loop
     let mut app = App::new(&api_url, secret);
 
+    // 内核缺失时启动即可见提示，避免只按 [S] 才发现找不到内核
+    if !app.core_mgr.is_installed() {
+        app.set_status(format!("✘ {}", app.core_mgr.missing_hint()));
+    }
+
     while !app.should_quit {
         terminal.draw(|f| ui::render(f, &mut app))?;
 
@@ -921,29 +926,54 @@ fn get_clean_config_path() -> String {
     }
 }
 
-/// 解析工作目录，支持全局命令安装（便携布局）：
-/// - 当前目录已存在 clash-tui 数据（subscriptions.json / rules.json / bin/mihomo.exe /
-///   data/config.yaml 之一）时，保持当前目录不变（开发与就地运行的既有行为）；
-/// - 否则切换到 exe 所在目录，使通过 PATH 全局启动时数据、内核与配置跟随安装目录，
-///   而不是散落在用户随意的 cwd 中。
-fn resolve_working_dir() {
-    let has_layout = ["subscriptions.json", "rules.json"]
-        .iter()
-        .any(|f| std::path::Path::new(f).exists())
-        || std::path::Path::new("mihomo.exe").exists()
-        || std::path::Path::new("mihomo").exists()
-        || std::path::Path::new("bin").join("mihomo.exe").exists()
-        || std::path::Path::new("bin").join("mihomo").exists()
-        || std::path::Path::new("bin").join("mihomo").join("mihomo").exists()
-        || std::path::Path::new("data").join("config.yaml").exists();
+/// 判断目录是否为一个含内核的便携布局根目录。
+/// 只认内核二进制：`data/config.yaml`、`rules.json` 等是该程序自己生成的产物，
+/// 若把它们当作“这是数据目录”的证据，任何被误写入一次的空目录都会永久劫持工作目录
+/// （表现就是在该目录里启动时永远提示找不到 mihomo）。
+fn dir_has_kernel(dir: &std::path::Path) -> bool {
+    const NAMES: [&str; 2] = ["mihomo", "mihomo.exe"];
+    NAMES.iter().any(|n| dir.join(n).is_file())
+        || NAMES.iter().any(|n| dir.join("bin").join(n).is_file())
+        || NAMES
+            .iter()
+            .any(|n| dir.join("bin").join("mihomo").join(n).is_file())
+}
 
-    if has_layout {
+/// 判断目录是否已经存在 clash-tui 的数据产物（不含内核）。
+fn looks_like_data_dir(dir: &std::path::Path) -> bool {
+    ["subscriptions.json", "rules.json"]
+        .iter()
+        .any(|f| dir.join(f).exists())
+        || dir.join("data").join("config.yaml").exists()
+}
+
+/// 解析工作目录，支持全局命令安装（便携布局）：
+/// - 当前目录含内核（bin/mihomo）时保持当前目录不变（开发与就地运行的既有行为）；
+/// - 否则切换到 exe 所在目录，使通过 PATH 全局启动时数据、内核与配置跟随安装目录，
+///   而不是散落在用户随意的 cwd 中；
+/// - exe 目录也没有内核时（尚未放置内核），不要被 cwd 中残留的 data/config.yaml
+///   等生成物留下，仍然跟随安装目录，保持数据位置唯一。
+fn resolve_working_dir() {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if dir_has_kernel(&cwd) {
         return;
     }
 
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let _ = std::env::set_current_dir(exe_dir);
+    let exe_dir = match std::env::current_exe() {
+        Ok(p) => {
+            let p = std::fs::canonicalize(&p).unwrap_or(p);
+            match p.parent() {
+                Some(dir) => dir.to_path_buf(),
+                None => return,
+            }
         }
+        Err(_) => return,
+    };
+    if exe_dir == cwd {
+        return;
+    }
+
+    if dir_has_kernel(&exe_dir) || !looks_like_data_dir(&cwd) {
+        let _ = std::env::set_current_dir(&exe_dir);
     }
 }

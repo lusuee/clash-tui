@@ -138,6 +138,38 @@ cargo build --release
 
 ---
 
+## 常见问题排查
+
+### 提示「找不到 mihomo」/ 设置页显示 `[✘ MISSING]`
+
+程序按「当前工作目录优先、可执行文件所在目录兜底」的顺序定位内核，均接受以下三种放置方式
+（Windows 对应 `mihomo.exe`）：
+
+```
+<目录>/mihomo          # 直接放在根目录
+<目录>/bin/mihomo      # 推荐
+<目录>/bin/mihomo/mihomo
+```
+
+判定「某目录是数据目录」只认内核二进制，`data/config.yaml`、`rules.json` 等程序自己生成的产物
+不作为依据。因此：
+
+- 内核与 `clash-tui` 放在一起时，在**任意目录**执行 `clash-tui` 都能正常启动，数据始终跟随安装目录；
+- 旧版本曾把 `data/config.yaml` 等生成物当作判断依据，因此在 `bin/` 这类子目录里误启动过一次后，
+  该目录会被永久当作数据目录，内核路径变成 `<目录>/bin/bin/mihomo`，从而一直报「找不到 mihomo」。
+  当前版本已修复，这类残留文件也可以直接删除。
+
+排查命令：
+
+```bash
+ls -l ./bin/mihomo            # 或 ./mihomo、./bin/mihomo/mihomo
+chmod +x ./bin/mihomo         # macOS / Linux 确认可执行
+```
+
+设置页 `Binary Image` 一行会显示程序**实际使用**的绝对路径，缺失时附 `[✘ MISSING]` 标记，可直接对照。
+
+---
+
 ## 目录结构
 
 ```
