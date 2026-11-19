@@ -40,7 +40,7 @@
 clash-tui/
 ├── src/                  # 全部 Rust 源码（单二进制）
 ├── bin/                  # mihomo 内核二进制（gitignored，运行时放置）
-├── data/                 # 内核运行目录（gitignored）：config.yaml、mihomo.log、
+├── data/                 # 内核运行目录（gitignored）：config.yaml、dns.json、mihomo.log、
 │                         # cache.db、geoip/geosite 数据、Rules/RuleSet
 ├── profiles/             # 订阅原始下载存档 {sub_id}.yaml（gitignored）
 ├── subscriptions.json    # 订阅元数据（gitignored，含私密 URL）
@@ -59,12 +59,13 @@ clash-tui/
 | 文件 | 职责 | 关键类型 / 函数 |
 |---|---|---|
 | `src/main.rs` | 程序入口、事件循环、**所有键盘事件分发**、后台任务 | `main`、`AppEvent`、`handle_key_event`、`get_clean_config_path` |
-| `src/app.rs` | 核心状态机 `App`（唯一可变状态）、Tab/焦点/光标、弹窗模型、格式化工具 | `App`、`ActiveTab`、`ProxyFocus`、`AddSubModal`、`AddRuleModal`、`update_proxies` |
-| `src/ui.rs` | 纯渲染层（Cyber HUD 一体化面板、全息弹窗、Emoji 宽度安全排版），无业务逻辑 | `render`、`render_*_tab`、`render_add_sub_modal`、`format_display_name` |
+| `src/app.rs` | 核心状态机 `App`（唯一可变状态）、Tab/焦点/光标、弹窗模型、格式化工具 | `App`、`ActiveTab`、`ProxyFocus`、`AddSubModal`、`AddRuleModal`、`DnsModal`、`update_proxies` |
+| `src/ui.rs` | 纯渲染层（Cyber HUD 一体化面板、全息弹窗、Emoji 宽度安全排版），无业务逻辑 | `render`、`render_*_tab`、`render_add_sub_modal`、`render_dns_modal`、`format_display_name` |
 | `src/api.rs` | Mihomo REST 客户端（可 Clone，供 tokio task 持有） | `ClashClient` |
 | `src/core.rs` | Mihomo 内核守护进程生命周期管理 | `CoreManager::{start_core, stop_core, start_core_as_admin, is_running, ensure_default_config}` |
 | `src/subscriptions.rs` | 订阅 CRUD、下载解析、**生成本地生效配置** | `SubscriptionManager::{add, delete, set_active, update_subscription}`、`parse_node_count` |
 | `src/rules.rs` | 自定义域名路由规则：持久化、解析、YAML 注入 | `RuleManager`、`RuleTarget`、`parse_domain_input`、`resolve_proxy_target`、`inject_domain_rules`、`apply_rules_to_config` |
+| `src/dnsconf.rs` | DNS 覆盖配置：持久化 `data/dns.json`、`dns` 段注入与校验 | `DnsManager`、`DnsSettings`、`DnsPolicy`、`inject_dns_settings`、`parse_list`、`parse_policies` |
 | `src/sysproxy.rs` | 系统代理（WinINet / macOS networksetup） | `SysProxy::{get_status, set_proxy}` |
 | `src/envproxy.rs` | 环境变量代理 + shell 脚本生成 | `EnvProxy::{get_status, set_env_proxy, generate_shell_scripts}` |
 | `src/theme.rs` | Cyber Neon HUD 调色板与组件样式 | `Theme::{GREEN, CYAN, LAVENDER, latency_badge, protocol_color, ...}` |
@@ -118,7 +119,7 @@ clash-tui/
               注入 external-controller=127.0.0.1:9090、mixed-port
               写入 data/config.yaml          ← 内核实际加载的文件
                                         │
-              crate::rules::apply_rules_to_config()   ← 注入自定义域名规则
+              crate::rules::apply_rules_to_config()   ← 注入自定义域名规则 + DNS 覆盖
                                         ▼
               client.reload_config(get_clean_config_path())
               （PUT /configs?force=true，path 为去掉 \\?\ 前缀的绝对路径）
@@ -150,7 +151,11 @@ clash-tui/
 1. `resolve_proxy_target` 从 `data/config.yaml` 选 PROXY 类规则使用的目标代理组，优先级：
    `proxy-groups` 中名字含 `proxy` 的组 → 第一个非 direct/reject 组 → 第一个组 → `proxies[0].name` → `DIRECT`；
 2. 生成规则行 `TYPE,VALUE,TARGET`：`target=Direct` 写 `DIRECT`，`target=Proxy` 写解析出的代理组名；**插入 `rules` 列表最顶部**（Clash 规则自上而下匹配，顶部即最高优先级，先于订阅自带规则和 `MATCH`）；
-3. 通过 `serde_yaml::Value` 操作，保留订阅配置其余字段不变。
+3. **DNS 策略**：DIRECT 规则的 `system` 解析策略与用户 DNS 覆盖统一由 `dnsconf.rs` 的 `inject_dns_settings` 注入（规则见 5.6）；`inject_domain_rules` 只负责规则行与去重；
+4. **去重**：注入前先删除 `rules` 中 payload（第二个逗号字段）与本次自定义域名相同的旧条目（上次注入的、目标已改的、类型已改的都算），再插入新规则，避免反复 apply 造成重复堆积；其余订阅规则及其顺序原样保留；
+5. 通过 `serde_yaml::Value` 操作，保留订阅配置其余字段不变。
+
+**注意**：`nameserver-policy` 写的是 `system`，即走操作系统 DNS（公司/路由器下发的内部 DNS）；若订阅本身已为同域名配置了内网 DNS 服务器，则保留订阅的值不动。
 
 **生效时机**：`RuleManager::add/remove/toggle_target` 后、`subscriptions.rs` 两个写配置点之后，统一调用无状态函数 `apply_rules_to_config() -> (规则数, 目标组)`（内部重新读 rules.json + data/config.yaml），随后由调用方 `reload_config` 热重载。订阅切换/内核重启不丢规则。
 
@@ -178,6 +183,32 @@ clash-tui/
 - 延迟来自 `history[-1].delay` 缓存 + 手动测速（`t` 单个 / `T` 整组，`GET /proxies/{node}/delay`）；
 - 节点排序（`o` 循环：`Default` 订阅顺序 → `Name` 名称 → `Ping` 延迟升序，未测速排最后）：在 `App::current_group_nodes()` 统一实现，所有消费方（渲染/Enter 选择/测速）使用同一排序视图。
 
+### 5.6 DNS 覆盖配置（Settings 页，按键 `d`）
+
+**功能**：在 TUI 内编辑 DNS 覆盖项，免去手改订阅生成的 `data/config.yaml`（订阅更新会覆盖手改内容）。
+
+**持久化** `data/dns.json`（`DnsSettings`）：
+
+```json
+{
+  "direct_use_system_dns": true,
+  "nameserver": ["192.168.121.6", "https://doh.pub/dns-query"],
+  "fallback": [],
+  "proxy_server_nameserver": [],
+  "default_nameserver": [],
+  "policies": [{ "domain": "+.corp.example", "server": "192.168.121.6" }]
+}
+```
+
+**弹窗交互**（`DnsModal`）：`Tab` / `↓` 下一字段、`↑` / `BackTab` 上一字段、`Space` 切换 `DIRECT DNS POLICY`、`Enter` 校验并保存、`Esc` 取消。列表字段逗号分隔；策略字段 `域名=服务器`、分号分隔多条，解析失败时状态栏报错且弹窗保持打开。
+
+**注入** `inject_dns_settings(yaml, settings, rules)`：
+- 非空列表覆盖同名 `dns` 字段，留空沿用订阅值；
+- 用户 `policies` 先写入 `dns.nameserver-policy`（覆盖订阅同名 key），`direct_use_system_dns=true` 时再为 DIRECT 的 `DOMAIN` / `DOMAIN-SUFFIX` 规则补 `system`（仅缺失；`DOMAIN-SUFFIX` 写 `+.域名`）；
+- 订阅无 `dns` 段时，只有用户显式提供 `nameserver` 才创建（`enable: true` + 默认 `default-nameserver`）；`dns.enable=false` 时仅用户显式覆盖且 nameserver 可用才启用。
+
+**流水线**：保存后写 `data/dns.json` → `rules::apply_rules_to_config()`（内部同时注入规则与 DNS）→ `reload_config` 热重载。订阅激活/更新写配置后同样重新注入，因此 DNS 覆盖不会被订阅更新冲掉。
+
 ---
 
 ## 6. 数据文件格式
@@ -186,6 +217,7 @@ clash-tui/
 |---|---|---|---|
 | `subscriptions.json` | `Vec<SubscriptionItem>`：`{id, name, url, active, node_count, last_updated}` | subscriptions.rs | id 格式 `sub_{unix_ts}`，同时是 profile 文件名 |
 | `rules.json` | `Vec<RuleItem>`：`{rule_type, value, target}` | rules.rs | 见 5.2 |
+| `data/dns.json` | `DnsSettings`：`{direct_use_system_dns, nameserver, fallback, proxy_server_nameserver, default_nameserver, policies}` | dnsconf.rs | 见 5.6 |
 | `profiles/{sub_id}.yaml` | 订阅原始内容（Clash YAML 或 base64 节点列表） | subscriptions.rs | 只存原始内容，不做加工 |
 | `data/config.yaml` | Mihomo 完整配置 | subscriptions.rs + rules.rs | 唯一生效配置，内核以 `-d data` 加载 |
 | `data/mihomo.log` | 追加日志 | mihomo 内核 | 排障入口 |
@@ -248,4 +280,4 @@ cargo build --release        # 产出 target/release/clash-tui.exe
 
 ### 新增持久化数据
 
-新建 `src/xxx.rs`，模式照抄 `RuleManager`：`new()` 载入 + `load/save/add/remove`；在 `main.rs` 声明 `mod xxx;`；若数据需注入 `data/config.yaml`，提供无状态 `apply_to_config()` 函数并在 `subscriptions.rs` 写配置点之后调用。
+新建 `src/xxx.rs`，模式照抄 `RuleManager`（持久化 + 无状态注入，如 `dnsconf.rs::DnsManager`）：`new()` 载入 + `load/save`；在 `main.rs` 声明 `mod xxx;`；若数据需注入 `data/config.yaml`，提供无状态注入函数（`inject_dns_settings` 的样子）并在 `rules::apply_rules_to_config()` 中串接，确保订阅写配置后同步生效。

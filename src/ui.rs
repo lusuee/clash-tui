@@ -43,6 +43,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if let Some(modal) = &app.show_add_rule_modal {
         render_add_rule_modal(f, modal, &app.rule_mgr.target_hint);
     }
+    if let Some(modal) = &app.show_dns_modal {
+        render_dns_modal(f, modal);
+    }
     if let Some(port_input) = &app.show_edit_port_modal {
         render_edit_port_modal(f, port_input);
     }
@@ -724,7 +727,7 @@ fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
 fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Length(9), Constraint::Min(4)])
+        .constraints([Constraint::Length(9), Constraint::Length(10), Constraint::Min(4)])
         .split(area);
 
     // Card 1: Mihomo Core Daemon Telemetry
@@ -812,10 +815,59 @@ fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let platform_name = "Linux Generic (Desktop Environment Hooks)";
 
+    let dns_settings = &app.dns_mgr.settings;
+    let (dns_mode, dns_mode_style) = if dns_settings.has_overrides() {
+        (
+            "[■ CUSTOM ]",
+            Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        ("[○ INHERIT]", Style::default().fg(Theme::MUTED))
+    };
+    let dns_nameservers = if dns_settings.nameserver.is_empty() {
+        "subscription nameservers".to_string()
+    } else {
+        dns_settings.nameserver.join(", ")
+    };
+    let auto_direct_count = app
+        .rule_mgr
+        .rules
+        .iter()
+        .filter(|r| {
+            r.target == RuleTarget::Direct
+                && (r.rule_type == "DOMAIN" || r.rule_type == "DOMAIN-SUFFIX")
+        })
+        .count();
+
     let net_lines = vec![
         Line::from(vec![
             Span::styled("◈ Platform Driver:   ", Style::default().fg(Theme::SUBTEXT0)),
             Span::styled(platform_name, Style::default().fg(Theme::TEXT)),
+        ]),
+        Line::from(vec![
+            Span::styled("◈ DNS Nameservers:   ", Style::default().fg(Theme::SUBTEXT0)),
+            Span::styled(dns_mode, dns_mode_style),
+            Span::styled(format!(" {}", dns_nameservers), Style::default().fg(Theme::TEXT)),
+            Span::styled("  [d] Edit DNS Config", Style::default().fg(Theme::YELLOW)),
+        ]),
+        Line::from(vec![
+            Span::styled("◈ DIRECT DNS Policy: ", Style::default().fg(Theme::SUBTEXT0)),
+            if dns_settings.direct_use_system_dns {
+                Span::styled(
+                    "[SYSTEM DNS]",
+                    Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled("[INHERIT   ]", Style::default().fg(Theme::MUTED))
+            },
+            Span::styled(
+                format!(
+                    "  {} user policies · {} DIRECT auto (system)",
+                    dns_settings.policies.len(),
+                    auto_direct_count
+                ),
+                Style::default().fg(Theme::SUBTEXT0),
+            ),
         ]),
         Line::from(vec![
             Span::styled("◈ System Proxy:      ", Style::default().fg(Theme::SUBTEXT0)),
@@ -1021,6 +1073,165 @@ fn render_add_rule_modal(f: &mut Frame, modal: &crate::app::AddRuleModal, proxy_
     f.render_widget(Paragraph::new(help_text).alignment(Alignment::Center), chunks[3]);
 }
 
+fn render_dns_modal(f: &mut Frame, modal: &crate::app::DnsModal) {
+    let area = centered_rect(74, 74, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " 󰖟 DNS OVERRIDES & POLICY EDITOR ",
+            Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Theme::active_border());
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Hint
+            Constraint::Length(3), // DIRECT toggle
+            Constraint::Length(3), // nameserver
+            Constraint::Length(3), // fallback
+            Constraint::Length(3), // proxy-server-nameserver
+            Constraint::Length(3), // default-nameserver
+            Constraint::Length(3), // domain policies
+            Constraint::Length(2), // Help
+        ])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new("覆盖订阅 DNS 字段（留空 = 沿用订阅值）：")
+            .style(Style::default().fg(Theme::SUBTEXT0)),
+        chunks[0],
+    );
+
+    let toggle_style = if modal.active_field == 0 {
+        Theme::active_border()
+    } else {
+        Theme::inactive_border()
+    };
+    let toggle_block = Block::default()
+        .title(" DIRECT DNS POLICY ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(toggle_style);
+    let toggle_line = if modal.direct_system {
+        Line::from(vec![
+            Span::styled(
+                " [■ ENABLED ] ",
+                Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "DIRECT 规则命中域名使用 system DNS（内网域名必需）  ",
+                Style::default().fg(Theme::TEXT),
+            ),
+            Span::styled("[Space] Toggle", Style::default().fg(Theme::YELLOW)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" [  DISABLED] ", Style::default().fg(Theme::MUTED)),
+            Span::styled(
+                "沿用订阅 DNS（内网域名可能 NXDOMAIN）  ",
+                Style::default().fg(Theme::SUBTEXT0),
+            ),
+            Span::styled("[Space] Toggle", Style::default().fg(Theme::YELLOW)),
+        ])
+    };
+    f.render_widget(Paragraph::new(toggle_line).block(toggle_block), chunks[1]);
+
+    render_dns_input(
+        f,
+        chunks[2],
+        " Nameserver [逗号分隔] ",
+        &modal.nameserver,
+        modal.active_field == 1,
+    );
+    render_dns_input(
+        f,
+        chunks[3],
+        " Fallback [逗号分隔] ",
+        &modal.fallback,
+        modal.active_field == 2,
+    );
+    render_dns_input(
+        f,
+        chunks[4],
+        " Proxy Server Nameserver [逗号分隔] ",
+        &modal.proxy_nameserver,
+        modal.active_field == 3,
+    );
+    render_dns_input(
+        f,
+        chunks[5],
+        " Default Nameserver [逗号分隔] ",
+        &modal.default_nameserver,
+        modal.active_field == 4,
+    );
+    render_dns_input(
+        f,
+        chunks[6],
+        " Domain Policies（域名=服务器; 多条用分号） ",
+        &modal.policies,
+        modal.active_field == 5,
+    );
+
+    let help_text = vec![
+        Line::from(vec![
+            Span::styled("[Tab/↓] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::raw("下一字段  "),
+            Span::styled("[Space] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+            Span::raw("切换 DIRECT 策略  "),
+            Span::styled("[Enter] ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+            Span::raw("保存并热重载  "),
+            Span::styled("[Esc] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
+            Span::raw("取消"),
+        ]),
+        Line::from(vec![
+            Span::styled("示例：", Style::default().fg(Theme::SUBTEXT0)),
+            Span::styled("+.corp.example=192.168.121.6", Style::default().fg(Theme::GREEN)),
+            Span::raw("   ·   nameserver: "),
+            Span::styled(
+                "system, 223.6.6.6, https://doh.pub/dns-query",
+                Style::default().fg(Theme::MAUVE),
+            ),
+        ]),
+    ];
+    f.render_widget(
+        Paragraph::new(help_text).alignment(Alignment::Center),
+        chunks[7],
+    );
+}
+
+fn render_dns_input(f: &mut Frame, area: Rect, title: &str, value: &str, active: bool) {
+    let border_style = if active {
+        Theme::active_border()
+    } else {
+        Theme::inactive_border()
+    };
+    let block = Block::default()
+        .title(title.to_string())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style);
+    let text = if active {
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                value,
+                Style::default().fg(Theme::TEXT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(Theme::CYAN)),
+        ])
+    } else {
+        Line::from(Span::styled(value.to_string(), Style::default().fg(Theme::TEXT)))
+    };
+    f.render_widget(Paragraph::new(text).block(block), area);
+}
+
 fn render_edit_port_modal(f: &mut Frame, port_input: &str) {
     let area = centered_rect(52, 28, f.area());
     f.render_widget(Clear, area);
@@ -1173,6 +1384,8 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw("EnvProxy  "),
                 Span::styled("[n] ", Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD)),
                 Span::raw("TUN  "),
+                Span::styled("[d] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
+                Span::raw("DNS  "),
                 Span::styled("[P] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
                 Span::raw("Port  "),
                 Span::styled("[A] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),

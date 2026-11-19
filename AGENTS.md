@@ -35,6 +35,7 @@ clash-tui uninstall            # 卸载（移除 PATH，清理自启服务）
 | 内核进程启停/开机自启/UAC 提权 | `src/core.rs`（静默 VBS + 计划任务/LaunchAgents/systemd） |
 | 订阅下载/激活/生效配置写入 | `src/subscriptions.rs` |
 | 自定义域名路由规则（DIRECT/PROXY） | `src/rules.rs`（持久化 rules.json + YAML 注入） |
+| DNS 覆盖配置（Settings → `d`） | `src/dnsconf.rs`（持久化 data/dns.json + 注入 config.yaml 的 dns 段） |
 | 系统代理/环境变量代理 | `src/sysproxy.rs` / `src/envproxy.rs` |
 | 颜色样式 | `src/theme.rs`（统一走 `Theme::*`，勿硬编码色值） |
 
@@ -43,7 +44,7 @@ clash-tui uninstall            # 卸载（移除 PATH，清理自启服务）
 1. **事件驱动**：所有异步操作用 `tokio::spawn`，结果经 `mpsc` 的 `AppEvent`（定义在 `main.rs`）回主循环更新 `App` 状态；禁止在渲染路径或按键处理里同步阻塞/做网络请求。
 2. **单一可变状态**：业务状态只放 `App`；渲染函数只读（`ui::render(f, &mut app)` 中仅更新 TableState 光标）。
 3. **配置生效流水线**（让任何配置改动生效的唯一正确姿势）：
-   写 `data/config.yaml` → 调 `crate::rules::apply_rules_to_config()`（重注入自定义规则）→ `client.reload_config(&get_clean_config_path()).await`。直接改内核其他路径无效。
+   写 `data/config.yaml` → 调 `crate::rules::apply_rules_to_config()`（同时重注入自定义规则与 `data/dns.json` 的 DNS 覆盖）→ `client.reload_config(&get_clean_config_path()).await`。直接改内核其他路径无效。
 4. **YAML 操作用 `serde_yaml::Value`**：注入字段（external-controller、mixed-port、rules）而非重建结构，保留订阅其余内容。
 5. **状态提示**：成功前缀 `✔`、失败前缀 `✘`（`app.set_status()`），TUI 中可混用中英文。
 6. **gitignore 文件禁提交**：`bin/`、`data/`、`profiles/`、`subscriptions.json`、`rules.json`、`target/`（订阅 URL 与规则含用户隐私）。
@@ -61,7 +62,7 @@ clash-tui uninstall            # 卸载（移除 PATH，清理自启服务）
 ## 常见任务配方
 
 - **新增 Tab / 快捷键 / 弹窗 / REST 封装 / 持久化数据**：按 `ARCHITECTURE.md` §9 的分步指南执行（以 Rules 页为现成范本，照抄结构最稳）。
-- **新增功能涉及让流量规则生效**：走约定 3 的流水线，规则注入逻辑放 `rules.rs`。
+- **新增功能涉及让流量规则生效**：走约定 3 的流水线，规则注入逻辑放 `rules.rs`，DNS 注入逻辑放 `dnsconf.rs`。
 - **README 同步**：改动快捷键或新增功能后，更新 `README.md` 的「快捷键速查表」与「核心特性」。
 
 ## 完成定义（DoD）

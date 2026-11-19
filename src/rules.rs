@@ -274,6 +274,7 @@ fn resolve_proxy_target(yaml_val: &serde_yaml::Value) -> String {
 
 /// 将自定义规则注入到 YAML 配置的 rules 列表顶部（规则优先级最高）。
 /// 每条规则按自身 target 决定去向：DIRECT 直连，或解析出的代理组。
+/// 注入前先移除旧配置里同域名的自定义规则，避免反复 apply 造成重复堆积。
 /// 返回 PROXY 类规则实际使用的目标代理组
 pub fn inject_domain_rules(yaml_val: &mut serde_yaml::Value, rules: &[RuleItem]) -> String {
     let proxy_target = resolve_proxy_target(yaml_val);
@@ -296,6 +297,9 @@ pub fn inject_domain_rules(yaml_val: &mut serde_yaml::Value, rules: &[RuleItem])
         return proxy_target;
     };
 
+    let values: std::collections::HashSet<&str> =
+        rules.iter().map(|r| r.value.as_str()).collect();
+
     let existing: serde_yaml::Sequence = map
         .get(serde_yaml::Value::String("rules".into()))
         .and_then(|v| v.as_sequence())
@@ -307,6 +311,13 @@ pub fn inject_domain_rules(yaml_val: &mut serde_yaml::Value, rules: &[RuleItem])
         new_rules.push(serde_yaml::Value::String(line));
     }
     for r in existing {
+        // 旧的同名规则（可能是上次注入、目标已变或类型已变）直接丢弃，避免重复堆积
+        let stale = r.as_str().map(|s| {
+            s.split(',').nth(1).map(str::trim).map(|p| values.contains(p)).unwrap_or(false)
+        });
+        if stale == Some(true) {
+            continue;
+        }
         new_rules.push(r);
     }
 
@@ -318,11 +329,13 @@ pub fn inject_domain_rules(yaml_val: &mut serde_yaml::Value, rules: &[RuleItem])
     proxy_target
 }
 
-/// 读取 rules.json 并注入当前生效配置 data/config.yaml（无状态，任何调用路径行为一致）
+/// 读取 rules.json / data/dns.json 并注入当前生效配置 data/config.yaml
+/// （无状态，任何调用路径行为一致）。规则为空但配置了 DNS 时同样执行。
 /// 返回 (注入的规则数量, 目标代理组)
 pub fn apply_rules_to_config() -> (usize, String) {
     let mgr = RuleManager::new();
-    if mgr.rules.is_empty() {
+    let dns_mgr = crate::dnsconf::DnsManager::new();
+    if mgr.rules.is_empty() && !dns_mgr.settings.is_active(&mgr.rules) {
         return (0, mgr.target_hint);
     }
 
@@ -334,6 +347,7 @@ pub fn apply_rules_to_config() -> (usize, String) {
     if let Ok(mut yaml_val) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
         let count = mgr.rules.len();
         let target = inject_domain_rules(&mut yaml_val, &mgr.rules);
+        crate::dnsconf::inject_dns_settings(&mut yaml_val, &dns_mgr.settings, &mgr.rules);
         if let Ok(out) = serde_yaml::to_string(&yaml_val) {
             let _ = fs::write(&config_path, out);
         }
@@ -454,5 +468,38 @@ proxy-groups:
             .collect();
         assert_eq!(injected[0], "DOMAIN-SUFFIX,direct.example,DIRECT");
         assert_eq!(injected[1], "DOMAIN-KEYWORD,proxied,MyProxy");
+    }
+
+    #[test]
+    fn reinjection_does_not_duplicate_same_domain_rules() {
+        let yaml = r#"
+rules:
+  - DOMAIN,bi.example.com,OldProxy
+  - DOMAIN-SUFFIX,bi.example.com,DIRECT
+  - DOMAIN-SUFFIX,other.example,OldProxy
+  - MATCH,DIRECT
+"#;
+        let mut val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let rules = vec![rule("DOMAIN", "bi.example.com", RuleTarget::Direct)];
+
+        inject_domain_rules(&mut val, &rules);
+        inject_domain_rules(&mut val, &rules);
+
+        let rules_out: Vec<String> = val
+            .get("rules")
+            .and_then(|v| v.as_sequence())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        let bi: Vec<&String> = rules_out
+            .iter()
+            .filter(|r| r.split(',').nth(1) == Some("bi.example.com"))
+            .collect();
+        assert_eq!(bi.len(), 1);
+        assert_eq!(bi[0], "DOMAIN,bi.example.com,DIRECT");
+        // 不属于自定义规则的订阅规则必须原样保留
+        assert!(rules_out.contains(&"DOMAIN-SUFFIX,other.example,OldProxy".to_string()));
+        assert_eq!(rules_out.last().unwrap(), "MATCH,DIRECT");
     }
 }

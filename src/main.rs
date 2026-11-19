@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod core;
+mod dnsconf;
 mod envproxy;
 mod installer;
 mod rules;
@@ -539,6 +540,54 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
         return;
     }
 
+    // Settings → DNS override modal
+    if app.show_dns_modal.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                app.close_dns_modal();
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                app.dns_modal_next_field();
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                app.dns_modal_prev_field();
+            }
+            KeyCode::Char(' ') => {
+                app.dns_modal_toggle();
+            }
+            KeyCode::Backspace => {
+                app.dns_modal_backspace();
+            }
+            KeyCode::Char(c) => {
+                app.dns_modal_handle_char(c);
+            }
+            KeyCode::Enter => match app.dns_modal_to_settings() {
+                Ok(settings) => {
+                    app.dns_mgr.settings = settings.clone();
+                    app.dns_mgr.save();
+                    let (count, target) = rules::apply_rules_to_config();
+                    app.rule_mgr.target_hint = target;
+                    app.show_dns_modal = None;
+                    app.set_status(format!(
+                        "✔ DNS 配置已保存并注入 ({} 条策略 / {} 条规则，热重载中...)",
+                        settings.policies.len(),
+                        count
+                    ));
+                    let client = app.client.clone();
+                    let full_path = get_clean_config_path();
+                    tokio::spawn(async move {
+                        let _ = client.reload_config(&full_path).await;
+                    });
+                }
+                Err(e) => {
+                    app.set_status(format!("✘ {}", e));
+                }
+            },
+            _ => {}
+        }
+        return;
+    }
+
     // Normal navigation keystrokes
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -859,7 +908,9 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
             }
         }
         KeyCode::Char('d') => {
-            if app.active_tab == ActiveTab::Connections && !app.connections.is_empty() {
+            if app.active_tab == ActiveTab::Settings {
+                app.open_dns_modal();
+            } else if app.active_tab == ActiveTab::Connections && !app.connections.is_empty() {
                 if let Some(conn) = app.connections.get(app.selected_conn_idx) {
                     let client = app.client.clone();
                     let id = conn.id.clone();

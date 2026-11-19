@@ -37,6 +37,11 @@
   - 支持三种匹配语法：`example.com`（DOMAIN-SUFFIX 含子域名）/ `full:example.com`（DOMAIN 精确匹配）/ `keyword:google`（DOMAIN-KEYWORD 关键字）。
   - 输入可加 `direct:` / `proxy:` 前缀直接指定去向（如 `direct:example.com`、`proxy:keyword:google`），优先于弹窗中的选择。
   - PROXY 目标代理组从订阅配置 `proxy-groups` 自动解析（优先含 `proxy` 的通用组）；列表内按 `t` 可随时切换选中规则的 DIRECT/PROXY，新增/删除/切换后自动通过 REST API 热重载内核即时生效。
+  - DIRECT 规则会自动在配置 `dns.nameserver-policy` 中补 `system` 解析策略（`DOMAIN` 精确 / `DOMAIN-SUFFIX` 用 `+.域名`），内网域名不再走订阅里的公共 DNS；只补缺失项、不覆盖订阅已有策略。重复 apply 会自动清掉同域名的旧规则，不再堆积。
+- 🧭 **DNS 覆盖编辑器 (Settings → `d`)**：
+  - 内置弹窗可覆盖订阅 DNS 的 `nameserver` / `fallback` / `proxy-server-nameserver` / `default-nameserver`，并支持自定义 `域名=服务器` 策略（`;` 分隔多条，写入 `dns.nameserver-policy`，优先于订阅同名策略）。
+  - `DIRECT DNS POLICY` 开关（默认开启）控制是否为 DIRECT 规则自动补 `system` 策略，内网域名不再被公共 DNS 解析失败拖累。
+  - 保存到 `data/dns.json`，立即合并进 `data/config.yaml` 并 REST 热重载；留空字段沿用订阅值。
 - 📊 **活跃连接追踪与控制**：
   - 实时监视活跃 TCP/UDP 连接、目标 Host、传输速率与命中分流规则。
   - 支持 `d` 终止单个连接，`D` 终止所有活动连接。
@@ -62,7 +67,8 @@
 | `a` | 弹出窗口新增订阅源（订阅页） / 新增域名路由规则（规则页） |
 | `u` / `U` | 异步更新选中的订阅源 / 一键并发更新所有订阅源（订阅页） |
 | `x` | 删除选中的订阅配置（订阅页） / 删除选中的域名路由规则（规则页） |
-| `d` / `D` | 终止选中的网络连接 / 终止所有活动网络连接（连接页） |
+| `d` | 终止选中的网络连接（连接页） / 打开 **DNS 覆盖编辑器**（设置页） |
+| `D` | 终止所有活动网络连接（连接页） |
 | `A` | **以管理员身份重启 Mihomo 内核 (UAC 提权)**（设置页） |
 | `s` / `S` | 手动终止 / 普通重启后台 Mihomo 内核进程（设置页） |
 | `r` | 手动强制刷新数据与重载本地订阅 |
@@ -177,7 +183,7 @@ chmod +x ./bin/mihomo         # macOS / Linux 确认可执行
 clash-tui/
 ├── clash-tui.exe / clash-tui # 原生编译可执行程序（单二进制）
 ├── bin/                      # Mihomo 内核放置目录 (mihomo.exe / mihomo)
-├── data/                     # 内核配置 (config.yaml) 与运行日志 (mihomo.log)
+├── data/                     # 内核配置 (config.yaml)、DNS 覆盖 (dns.json) 与运行日志 (mihomo.log)
 ├── profiles/                 # 本地订阅配置存档 (.yaml)
 ├── subscriptions.json        # 订阅元数据存档
 ├── rules.json                # 自定义域名路由规则存档
@@ -192,6 +198,7 @@ clash-tui/
 │   ├── core.rs               # 内核进程管理、静默自启引导与 UAC 提权
 │   ├── subscriptions.rs      # 订阅增删改查、YAML 解析、配置热更新
 │   ├── rules.rs              # 自定义域名路由规则持久化与注入
+│   ├── dnsconf.rs            # DNS 覆盖配置持久化与 dns 段注入
 │   └── api.rs                # Mihomo RESTful 控制器交互客户端
 └── Cargo.toml                # Rust 项目清单
 ```

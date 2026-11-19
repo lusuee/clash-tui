@@ -1,5 +1,6 @@
 use crate::api::{ClashClient, ConnectionItem, ProxyItem};
 use crate::core::CoreManager;
+use crate::dnsconf::{format_policies, parse_list, parse_policies, DnsManager, DnsSettings};
 use crate::envproxy::EnvProxy;
 use crate::rules::{RuleManager, RuleTarget};
 use crate::subscriptions::SubscriptionManager;
@@ -64,6 +65,22 @@ pub struct AddRuleModal {
     pub target: RuleTarget,
 }
 
+/// DNS 弹窗的字段数：0 为 DIRECT 系统 DNS 开关，1..=5 为文本字段
+pub const DNS_MODAL_FIELDS: usize = 6;
+
+#[derive(Debug, Clone)]
+pub struct DnsModal {
+    pub direct_system: bool,
+    pub nameserver: String,
+    pub fallback: String,
+    pub proxy_nameserver: String,
+    pub default_nameserver: String,
+    pub policies: String,
+    /// 当前焦点：0 = DIRECT 策略开关；1 = nameserver；2 = fallback；
+    /// 3 = proxy-server-nameserver；4 = default-nameserver；5 = 域名策略
+    pub active_field: usize,
+}
+
 pub struct App {
     pub client: ClashClient,
     pub active_tab: ActiveTab,
@@ -113,6 +130,9 @@ pub struct App {
     pub rule_mgr: RuleManager,
     pub selected_rule_idx: usize,
 
+    // DNS Overrides (Settings → DNS modal)
+    pub dns_mgr: DnsManager,
+
     // Core Daemon
     pub core_mgr: CoreManager,
 
@@ -120,6 +140,7 @@ pub struct App {
     pub show_add_sub_modal: Option<AddSubModal>,
     pub show_add_rule_modal: Option<AddRuleModal>,
     pub show_edit_port_modal: Option<String>,
+    pub show_dns_modal: Option<DnsModal>,
 
     // Table States for scrolling
     pub groups_table_state: TableState,
@@ -181,10 +202,13 @@ impl App {
             rule_mgr: RuleManager::new(),
             selected_rule_idx: 0,
 
+            dns_mgr: DnsManager::new(),
+
             core_mgr,
             show_add_sub_modal: None,
             show_add_rule_modal: None,
             show_edit_port_modal: None,
+            show_dns_modal: None,
 
             groups_table_state: TableState::default(),
             nodes_table_state: TableState::default(),
@@ -657,6 +681,87 @@ impl App {
         if let Some(modal) = &mut self.show_add_rule_modal {
             modal.input.pop();
         }
+    }
+
+    // DNS Modal
+    pub fn open_dns_modal(&mut self) {
+        let settings = self.dns_mgr.settings.clone();
+        self.show_dns_modal = Some(DnsModal {
+            direct_system: settings.direct_use_system_dns,
+            nameserver: settings.nameserver.join(", "),
+            fallback: settings.fallback.join(", "),
+            proxy_nameserver: settings.proxy_server_nameserver.join(", "),
+            default_nameserver: settings.default_nameserver.join(", "),
+            policies: format_policies(&settings.policies),
+            active_field: 0,
+        });
+    }
+
+    pub fn close_dns_modal(&mut self) {
+        self.show_dns_modal = None;
+    }
+
+    pub fn dns_modal_next_field(&mut self) {
+        if let Some(modal) = &mut self.show_dns_modal {
+            modal.active_field = (modal.active_field + 1) % DNS_MODAL_FIELDS;
+        }
+    }
+
+    pub fn dns_modal_prev_field(&mut self) {
+        if let Some(modal) = &mut self.show_dns_modal {
+            modal.active_field = (modal.active_field + DNS_MODAL_FIELDS - 1) % DNS_MODAL_FIELDS;
+        }
+    }
+
+    pub fn dns_modal_toggle(&mut self) {
+        if let Some(modal) = &mut self.show_dns_modal {
+            if modal.active_field == 0 {
+                modal.direct_system = !modal.direct_system;
+            }
+        }
+    }
+
+    pub fn dns_modal_handle_char(&mut self, c: char) {
+        if let Some(modal) = &mut self.show_dns_modal {
+            let field = match modal.active_field {
+                1 => &mut modal.nameserver,
+                2 => &mut modal.fallback,
+                3 => &mut modal.proxy_nameserver,
+                4 => &mut modal.default_nameserver,
+                5 => &mut modal.policies,
+                _ => return, // 开关字段不接收字符
+            };
+            if field.chars().count() < 512 {
+                field.push(c);
+            }
+        }
+    }
+
+    pub fn dns_modal_backspace(&mut self) {
+        if let Some(modal) = &mut self.show_dns_modal {
+            let field = match modal.active_field {
+                1 => &mut modal.nameserver,
+                2 => &mut modal.fallback,
+                3 => &mut modal.proxy_nameserver,
+                4 => &mut modal.default_nameserver,
+                5 => &mut modal.policies,
+                _ => return,
+            };
+            field.pop();
+        }
+    }
+
+    /// 校验弹窗输入并转为可持久化的 DNS 设置（策略格式错误时返回提示，弹窗保持打开）
+    pub fn dns_modal_to_settings(&self) -> Result<DnsSettings, String> {
+        let modal = self.show_dns_modal.as_ref().ok_or("DNS 弹窗未打开")?;
+        Ok(DnsSettings {
+            direct_use_system_dns: modal.direct_system,
+            nameserver: parse_list(&modal.nameserver),
+            fallback: parse_list(&modal.fallback),
+            proxy_server_nameserver: parse_list(&modal.proxy_nameserver),
+            default_nameserver: parse_list(&modal.default_nameserver),
+            policies: parse_policies(&modal.policies)?,
+        })
     }
 
     pub fn modal_handle_char(&mut self, c: char) {
