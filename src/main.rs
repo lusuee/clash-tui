@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod appupdate;
 mod core;
 mod dnsconf;
 mod envproxy;
@@ -45,6 +46,9 @@ pub enum AppEvent {
     PortChanged(Result<u16, String>),
     KernelProgress(u8),
     KernelUpdateDone(Result<kernelupdate::KernelUpdateReport, String>),
+    AppUpdateChecked(Result<String, String>),
+    AppUpdateProgress(u8),
+    AppUpdateDone(Result<appupdate::AppUpdateReport, String>),
 }
 
 fn print_help() {
@@ -249,6 +253,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.set_status(format!("✘ {}", app.core_mgr.missing_hint()));
     }
 
+    // 上一次自更新可能留下改名后的旧二进制（Windows 下运行中无法直接删除）。
+    appupdate::cleanup_stale_backup();
+
+    // 静默检查 clash-tui 自身是否有新版本：只提示，安装由用户在 Settings 按 U 触发。
+    {
+        let tx_update = tx.clone();
+        let mixed_port = app.mixed_port;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let result = appupdate::check_latest(mixed_port).await;
+            let _ = tx_update.send(AppEvent::AppUpdateChecked(result));
+        });
+    }
+
     while !app.should_quit {
         terminal.draw(|f| ui::render(f, &mut app))?;
 
@@ -365,6 +383,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                AppEvent::AppUpdateChecked(res) => {
+                    match res {
+                        Ok(latest) => {
+                            let newer = appupdate::is_newer(&latest, appupdate::VERSION);
+                            app.app_latest = Some(latest.clone());
+                            if newer {
+                                app.set_status(format!(
+                                    "⬆ 发现 clash-tui 新版本 v{}（当前 {}），在设置页按 U 更新",
+                                    latest,
+                                    app.app_version
+                                ));
+                            }
+                        }
+                        // 启动时的静默检查：失败不打扰用户，按 U 时可重新检查并看到错误
+                        Err(_) => {}
+                    }
+                }
+                AppEvent::AppUpdateProgress(pct) => {
+                    app.app_progress = pct.min(100);
+                }
+                AppEvent::AppUpdateDone(res) => {
+                    app.app_busy = false;
+                    match res {
+                        Ok(report) => {
+                            app.app_latest = Some(report.latest.clone());
+                            if report.applied {
+                                app.app_progress = 100;
+                                app.restart_after_exit = true;
+                                app.should_quit = true;
+                            }
+                            app.set_status(report.message);
+                        }
+                        Err(e) => {
+                            app.app_progress = 0;
+                            app.set_status(format!("✘ clash-tui 更新失败: {e}"));
+                        }
+                    }
+                }
                 AppEvent::TunToggled(res) => {
                     match res {
                         Ok(active) => {
@@ -408,6 +464,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, Show);
     let _ = io::stdout().flush();
 
+    if app.restart_after_exit {
+        // 自动更新已替换 exe：用同一套命令行参数与工作目录拉起新版本。
+        match appupdate::restart_into_new_binary() {
+            Ok(()) => println!("Clash TUI 已更新，正在以新版本重新启动..."),
+            Err(e) => println!("✘ {e}"),
+        }
+        std::process::exit(0);
+    }
+
     if app.core_stopped_on_exit {
         println!("Clash TUI closed. Mihomo core has been stopped.");
     } else {
@@ -418,6 +483,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSender<AppEvent>) {
     if key.kind != KeyEventKind::Press {
+        return;
+    }
+
+    // 快捷键帮助浮层：只响应关闭键，避免误触后台操作
+    if app.show_help {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
+                app.show_help = false;
+            }
+            _ => {}
+        }
         return;
     }
 
@@ -620,6 +696,9 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
         }
         KeyCode::Char('q') => {
             app.should_quit = true;
+        }
+        KeyCode::Char('?') => {
+            app.show_help = true;
         }
         KeyCode::Tab => {
             app.next_tab();
@@ -899,6 +978,24 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
                             profiles_dir,
                         ).await;
                         let _ = tx_sub.send(AppEvent::SubUpdated { sub_id, result });
+                    });
+                }
+            } else if app.active_tab == ActiveTab::Settings {
+                if app.app_busy {
+                    app.set_status("clash-tui 更新正在进行中...");
+                } else {
+                    app.app_busy = true;
+                    app.app_progress = 0;
+                    app.set_status("检查 clash-tui 最新版本...");
+                    let mixed_port = app.mixed_port;
+                    let tx_update = tx.clone();
+                    tokio::spawn(async move {
+                        let tx_progress = tx_update.clone();
+                        let result = appupdate::update_app(mixed_port, move |pct| {
+                            let _ = tx_progress.send(AppEvent::AppUpdateProgress(pct));
+                        })
+                        .await;
+                        let _ = tx_update.send(AppEvent::AppUpdateDone(result));
                     });
                 }
             }

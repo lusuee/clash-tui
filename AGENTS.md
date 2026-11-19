@@ -34,6 +34,8 @@ clash-tui uninstall            # 卸载（移除 PATH，清理自启服务）
 | 全局安装/PATH管理 | `src/installer.rs`（纯原生注册/注销 PATH） |
 | 内核进程启停/开机自启/UAC 提权 | `src/core.rs`（静默 VBS + 计划任务/LaunchAgents/systemd） |
 | Mihomo 内核下载/更新（Settings → `K`） | `src/kernelupdate.rs`（GitHub Release 探测/下载/解压替换，Windows `zip`、unix `flate2`） |
+| clash-tui 自身版本/自更新（Settings → `U`） | `src/appupdate.rs` + `build.rs`（版本注入、下载替换当前 exe、退出重启） |
+| 快捷键帮助浮层（`?`） | `app.rs` 的 `show_help`、`main.rs::handle_key_event` 顶部优先分支、`ui.rs::render_help_modal`（改动按键时同步此表） |
 | 订阅下载/激活/生效配置写入 | `src/subscriptions.rs` |
 | 自定义域名路由规则（DIRECT/PROXY） | `src/rules.rs`（持久化 rules.json + YAML 注入） |
 | DNS 覆盖配置（Settings → `d`） | `src/dnsconf.rs`（持久化 data/dns.json + 注入 config.yaml 的 dns 段） |

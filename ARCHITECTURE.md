@@ -64,6 +64,8 @@ clash-tui/
 | `src/api.rs` | Mihomo REST 客户端（可 Clone，供 tokio task 持有） | `ClashClient` |
 | `src/core.rs` | Mihomo 内核守护进程生命周期管理 | `CoreManager::{start_core, stop_core, start_core_as_admin, is_running, ensure_default_config}` |
 | `src/kernelupdate.rs` | 内核下载/更新：GitHub Release 探测、资产选择、下载解压、替换并重启 | `KernelUpdateReport`、`update_kernel`、`latest_version`、`installed_version`、`extract_version` |
+| `src/appupdate.rs` | clash-tui 自身版本与自更新：编译期版本注入、GitHub 探测、下载替换并重启 | `VERSION`、`version_label`、`check_latest`、`update_app`、`restart_into_new_binary` |
+| `build.rs` | 编译期向二进制注入 `CLASH_TUI_VERSION`（CI tag 优先，本地回退 `git describe`，开发版带 `-dirty` 后缀） | — |
 | `src/subscriptions.rs` | 订阅 CRUD、下载解析、**生成本地生效配置** | `SubscriptionManager::{add, delete, set_active, update_subscription}`、`parse_node_count` |
 | `src/rules.rs` | 自定义域名路由规则：持久化、解析、YAML 注入 | `RuleManager`、`RuleTarget`、`parse_domain_input`、`resolve_proxy_target`、`inject_domain_rules`、`apply_rules_to_config` |
 | `src/dnsconf.rs` | DNS 覆盖配置：持久化 `data/dns.json`、`dns` 段注入与校验 | `DnsManager`、`DnsSettings`、`DnsPolicy`、`inject_dns_settings`、`parse_list`、`parse_policies` |
@@ -92,6 +94,7 @@ clash-tui/
 | `SubUpdated / SubActivated` | 订阅更新/激活 task | 状态提示 + 触发重载 |
 | `CoreActionDone` | 内核启停 task | 状态提示 |
 | `KernelProgress / KernelUpdateDone` | 内核更新 task（Settings 页按 `K`） | 下载进度、更新结果与版本同步 |
+| `AppUpdateChecked / AppUpdateProgress / AppUpdateDone` | 启动静默检查 task、Settings 页按 `U` 的自更新 task | 新版本提示、下载进度、安装完成后退出发起重启 |
 | `TunToggled / PortChanged` | TUN/端口修改 task | 回读实际状态并联动 SysProxy/EnvProxy |
 
 ### 4.2 启动流程（`main()`）
@@ -102,7 +105,8 @@ clash-tui/
 4. 设置 panic hook（恢复终端）→ 进入 AlternateScreen；
 5. 启动输入监听、流量轮询（1s）、慢速轮询（2.5s）三个 tokio task；
 6. `App::new()`（读取 SysProxy/EnvProxy 状态、加载 subscriptions.json 与 rules.json）；
-7. 进入主循环 `draw → recv → dispatch`。
+7. `cleanup_stale_backup()` 清理上次自更新残留的 `.old`；5 秒后静默 `check_latest()`，有新版只提示不安装；
+8. 进入主循环 `draw → recv → dispatch`。
 
 ---
 
@@ -230,6 +234,22 @@ clash-tui/
 **交互**：Settings 卡片新增 `Kernel Binary` 行（磁盘版本 / 可更新版本 / 下载百分比）；`K`（Shift+K）触发。安装目录需要写权限（装在 `Program Files` 时需管理员运行 clash-tui），失败会在状态栏提示。
 
 **依赖**：Windows 用 `zip` crate，unix 用 `flate2`，均在 `Cargo.toml` 中按 target 引入。
+
+### 5.8 clash-tui 自身版本与自动更新（Settings 页，按键 `U`）
+
+**版本注入**：`build.rs` 按优先级写 `CLASH_TUI_VERSION` 并以 `cargo:rustc-env` 注入二进制——CI tag 构建传 `github.ref_name`（如 `v0.2.5`）→ 本地 `git describe --tags --dirty --always` → `CARGO_PKG_VERSION`。`appupdate::VERSION` 即该常量，顶栏与 Settings 卡片直接显示。
+
+**检查**：启动 5 秒后 `check_latest()` 请求 `https://github.com/lusuee/clash-tui/releases/latest`，从跟随重定向后的 URL（`.../releases/tag/vX.Y.Z`）或 HTML 兜底解析最新版本（直连失败回退本地代理）；结果经 `AppUpdateChecked` 只更新提示，不自动安装。
+
+**安装**（`update_app`）：`is_newer` 成立且当前版本可解析（开发版 `-dirty` 等拒绝）→ 下载 `clash-tui-{windows-x64.zip|linux-x64.tar.gz|darwin-{x64,arm64}.tar.gz}` 到 `data/app-update/` → `extract_binary` 解出 `clash-tui(.exe)` → `install_running_binary`（Windows 不能覆盖运行中的 exe：先把自身改名为 `<exe>.old`，再复制新文件到原路径；失败回滚）。
+
+**重启**：安装成功置 `restart_after_exit`，主循环退出、终端恢复后 `restart_into_new_binary()` 用原命令行参数与 cwd 拉起新版本；下次启动 `cleanup_stale_backup()` 删除 `.old`。
+
+**依赖**：Windows `zip`，unix `flate2` + `tar`。
+
+### 5.9 快捷键帮助浮层（`?`）
+
+`App.show_help` 为 true 时 `render_help_modal` 在全部面板之上绘制双栏帮助：左栏全局键（退出、Tab/数字键、移动、模式、代理开关、端口、重载），右栏各标签页动作与弹窗按键。`handle_key_event` 在模态弹窗分支之前优先处理该浮层，此时只接受 `Esc` / `?` / `q` 关闭，其余按键一律吞掉——避免在帮助界面误触发停内核、删规则等操作。
 
 ---
 

@@ -1,4 +1,5 @@
 use crate::api::{ClashClient, ConnectionItem, ProxyItem};
+use crate::appupdate;
 use crate::core::CoreManager;
 use crate::dnsconf::{format_policies, parse_list, parse_policies, DnsManager, DnsSettings};
 use crate::envproxy::EnvProxy;
@@ -111,6 +112,16 @@ pub struct App {
     pub kernel_busy: bool,
     pub kernel_progress: u8,
 
+    // clash-tui self update (Settings → U)
+    /// 当前 clash-tui 版本（编译期注入，可能带 git 描述后缀）。
+    pub app_version: String,
+    /// 最近一次检查到的最新 clash-tui 版本（不含 `v`）。
+    pub app_latest: Option<String>,
+    pub app_busy: bool,
+    pub app_progress: u8,
+    /// 自动更新安装完成后，退出主循环时是否用新二进制重启
+    pub restart_after_exit: bool,
+
     // Traffic stats & History for Sparkline
     pub up_speed: u64,
     pub down_speed: u64,
@@ -153,6 +164,8 @@ pub struct App {
     pub show_add_rule_modal: Option<AddRuleModal>,
     pub show_edit_port_modal: Option<String>,
     pub show_dns_modal: Option<DnsModal>,
+    /// 快捷键帮助浮层（`?` 打开，Esc/`?`/`q` 关闭）
+    pub show_help: bool,
 
     // Table States for scrolling
     pub groups_table_state: TableState,
@@ -196,6 +209,12 @@ impl App {
             kernel_busy: false,
             kernel_progress: 0,
 
+            app_version: appupdate::version_label(),
+            app_latest: None,
+            app_busy: false,
+            app_progress: 0,
+            restart_after_exit: false,
+
             up_speed: 0,
             down_speed: 0,
             up_history: vec![0; 36],
@@ -229,6 +248,7 @@ impl App {
             show_add_rule_modal: None,
             show_edit_port_modal: None,
             show_dns_modal: None,
+            show_help: false,
 
             groups_table_state: TableState::default(),
             nodes_table_state: TableState::default(),

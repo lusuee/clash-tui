@@ -1,4 +1,5 @@
 use crate::app::{format_bytes, format_speed, ActiveTab, App, ModalField, ProxyFocus};
+use crate::appupdate;
 use crate::kernelupdate;
 use crate::rules::RuleTarget;
 use crate::theme::Theme;
@@ -50,6 +51,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if let Some(port_input) = &app.show_edit_port_modal {
         render_edit_port_modal(f, port_input);
     }
+    if app.show_help {
+        let area = f.area();
+        render_help_modal(f, area);
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -97,6 +102,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(" ⚡ CLASH", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
         Span::styled("//", Style::default().fg(Theme::SURFACE2)),
         Span::styled("TUI ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{} ", app.app_version), Style::default().fg(Theme::SUBTEXT0)),
         Span::styled("│ ", Style::default().fg(Theme::SURFACE2)),
         Span::styled(conn_sym, conn_style),
         Span::styled(" │ ", Style::default().fg(Theme::SURFACE2)),
@@ -792,6 +798,34 @@ fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
         )
     };
 
+    let (app_update_text, app_update_style) = if app.app_busy {
+        (
+            format!("[{:>3}%] 正在下载 clash-tui 更新...", app.app_progress),
+            Style::default()
+                .fg(Theme::YELLOW)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if let Some(latest) = &app.app_latest {
+        if appupdate::is_newer(latest, appupdate::VERSION) {
+            (
+                format!("v{latest} 可更新（当前 {}）  [U] 立即更新", app.app_version),
+                Style::default()
+                    .fg(Theme::YELLOW)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            (
+                format!("{} 已是最新  [U] 重新检查", app.app_version),
+                Style::default().fg(Theme::MUTED),
+            )
+        }
+    } else {
+        (
+            format!("{} · [U] 检查更新", app.app_version),
+            Style::default().fg(Theme::SUBTEXT0),
+        )
+    };
+
     let core_lines = vec![
         Line::from(binary_line),
         Line::from(vec![
@@ -801,6 +835,10 @@ fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled("◈ Kernel Binary:    ", Style::default().fg(Theme::SUBTEXT0)),
             Span::styled(kernel_update_text, kernel_update_style),
+        ]),
+        Line::from(vec![
+            Span::styled("◈ Clash TUI:        ", Style::default().fg(Theme::SUBTEXT0)),
+            Span::styled(app_update_text, app_update_style),
         ]),
         Line::from(vec![
             Span::styled("◈ Daemon Lifecycle:  ", Style::default().fg(Theme::SUBTEXT0)),
@@ -1338,6 +1376,108 @@ fn absolute_path_display(p: &std::path::Path) -> String {
     }
 }
 
+// ----------------------------------------------------------------------------
+// 9.5 Help overlay: all key bindings (`?`)
+// ----------------------------------------------------------------------------
+fn help_section(title: &'static str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("◈ {title}"),
+        Style::default()
+            .fg(Theme::MAUVE)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+    ))
+}
+
+fn help_row(key: &'static str, desc: &'static str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!(" {key:<14}"),
+            Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(desc, Style::default().fg(Theme::TEXT)),
+    ])
+}
+
+fn help_left_column() -> Vec<Line<'static>> {
+    vec![
+        help_section("GLOBAL"),
+        help_row("q / Ctrl+C", "退出（内核继续在后台运行）"),
+        help_row("Q", "退出并停止内核"),
+        help_row("? / Esc", "打开 / 关闭本帮助"),
+        help_row("Tab / Shift+Tab", "下一个 / 上一个标签页"),
+        help_row("1 … 5", "直达 Proxies / Conns / Subs / Settings / Rules"),
+        help_row("j k ↑ ↓", "上下移动选中项"),
+        help_row("g G Home End", "跳到首项 / 末项"),
+        help_row("PgUp / PgDn", "整页滚动"),
+        help_row("h l ← →", "左右切换代理组 / 表单字段"),
+        help_row("Enter", "激活订阅 / 选择节点 / 确认"),
+        help_row("m", "循环切换代理模式"),
+        help_row("p / e", "系统代理 / 环境变量代理"),
+        help_row("n", "TUN 虚拟网卡开关"),
+        help_row("P", "修改混合代理端口"),
+        help_row("r", "重载本地订阅与配置"),
+    ]
+}
+
+fn help_right_column() -> Vec<Line<'static>> {
+    vec![
+        help_section("PROXIES"),
+        help_row("Enter", "切换所选组内的节点"),
+        help_row("t / T", "测速所选节点 / 整组节点"),
+        help_row("o", "切换节点排序（Default/Name/Ping）"),
+        help_section("CONNECTIONS"),
+        help_row("d / D", "关闭所选连接 / 全部连接"),
+        help_section("SUBSCRIPTIONS"),
+        help_row("a", "新增订阅"),
+        help_row("u / U", "更新所选 / 全部订阅"),
+        help_row("Enter", "激活订阅并重载内核"),
+        help_row("x", "删除所选订阅"),
+        help_section("SETTINGS"),
+        help_row("d", "DNS 覆盖编辑器"),
+        help_row("K", "下载 / 更新 Mihomo 内核"),
+        help_row("U", "检查并安装 clash-tui 自身更新"),
+        help_row("s / S", "停止内核 / 重启内核"),
+        help_row("A", "以管理员身份运行内核"),
+        help_section("RULES"),
+        help_row("a", "新增域名规则"),
+        help_row("t", "切换 DIRECT / PROXY 去向"),
+        help_row("x", "删除所选规则"),
+        help_section("弹窗内"),
+        help_row("Esc", "关闭弹窗"),
+        help_row("Tab / Shift+Tab", "下一个 / 上一个字段"),
+        help_row("Space", "切换开关（DNS 弹窗）"),
+        help_row("Enter", "保存并热重载"),
+    ]
+}
+
+fn render_help_modal(f: &mut Frame, area: Rect) {
+    let popup = centered_rect(94, 92, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " ◈ KEY BINDINGS — 按 ? 或 Esc 关闭 ◈ ",
+            Style::default()
+                .fg(Theme::LAVENDER)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Theme::active_border())
+        .style(Style::default().bg(Theme::MANTLE));
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(inner);
+
+    f.render_widget(Paragraph::new(help_left_column()), columns[0]);
+    f.render_widget(Paragraph::new(help_right_column()), columns[1]);
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -1433,6 +1573,8 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw("DNS  "),
                 Span::styled("[K] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),
                 Span::raw("Kernel  "),
+                Span::styled("[U] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+                Span::raw("Self-Update  "),
                 Span::styled("[P] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
                 Span::raw("Port  "),
                 Span::styled("[A] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),
@@ -1473,6 +1615,8 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("Port", Style::default().fg(Theme::SUBTEXT0)),
         Span::styled(" │ [m] ", Style::default().fg(Theme::LAVENDER).add_modifier(Modifier::BOLD)),
         Span::styled("Mode", Style::default().fg(Theme::SUBTEXT0)),
+        Span::styled(" │ [?] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+        Span::styled("All Keys", Style::default().fg(Theme::SUBTEXT0)),
     ]);
     f.render_widget(Paragraph::new(global_keys), chunks[1]);
 }

@@ -63,6 +63,10 @@ jobs:
           sudo apt-get install -y libssl-dev pkg-config
 
       - name: Build release binary
+        env:
+          # tag 构建时把 tag 名（如 v0.2.5）注入二进制，保证 Settings/标题栏显示真实版本；
+          # 手工 workflow_dispatch 也允许用输入的 tag 名。
+          CLASH_TUI_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag_name }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package artifacts (Unix)

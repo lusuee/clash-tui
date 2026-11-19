@@ -46,6 +46,12 @@
   - 自动从官方 `MetaCubeX/mihomo` GitHub Release 探测最新版本，按当前平台挑选资产（Windows `.zip` / Linux、macOS `.gz`），下载解压后替换 `bin/mihomo`。
   - 更新前自动停止内核并备份旧文件，写入成功后按需重启；GitHub 直连失败时自动回退到本地混合端口代理。
   - 内核缺失时同一按键直接完成下载安装，无需再手动翻找内核文件。
+- 🔄 **版本显示与自更新 (Settings → `U`)**：
+  - 顶栏与设置页显示当前 `clash-tui` 版本（CI 用 Release tag 编译注入，本地构建回退 `git describe`）。
+  - 启动 5 秒后静默检查 GitHub Release；发现新版本只提示，不自动下载。
+  - 按 `U` 手动下载并原位替换当前可执行文件（Windows 先改名旧文件再写入），退出时自动用新版本重启，不影响内核。
+- ⌨️ **全量快捷键帮助 (`?`)**：
+  - 任意界面按 `?` 弹出分栏帮助浮层，按作用域列出全部按键（全局/各标签页/弹窗）；`Esc`、`?` 或 `q` 关闭。
 - 📊 **活跃连接追踪与控制**：
   - 实时监视活跃 TCP/UDP 连接、目标 Host、传输速率与命中分流规则。
   - 支持 `d` 终止单个连接，`D` 终止所有活动连接。
@@ -69,12 +75,13 @@
 | `T` | 一键并发测速当前分组内的所有节点 |
 | `o` | 轮转切换节点排序（`Default` 原始顺序 → `Name` 按名称 → `Ping` 按延迟升序）（代理页） |
 | `a` | 弹出窗口新增订阅源（订阅页） / 新增域名路由规则（规则页） |
-| `u` / `U` | 异步更新选中的订阅源 / 一键并发更新所有订阅源（订阅页） |
+| `u` / `U` | 异步更新选中的订阅源 / 一键并发更新所有订阅源（订阅页）；`U` 在设置页 = **检查并安装 clash-tui 自身更新** |
 | `x` | 删除选中的订阅配置（订阅页） / 删除选中的域名路由规则（规则页） |
 | `d` | 终止选中的网络连接（连接页） / 打开 **DNS 覆盖编辑器**（设置页） |
 | `D` | 终止所有活动网络连接（连接页） |
 | `A` | **以管理员身份重启 Mihomo 内核 (UAC 提权)**（设置页） |
 | `K` (Shift+K) | **检查并下载/更新 Mihomo 内核**（设置页；自动停内核 → 替换 → 重启，缺失时直接安装） |
+| `?` | 打开 / 关闭**全量快捷键帮助浮层**（`Esc`、`?` 或 `q` 关闭） |
 | `s` / `S` | 手动终止 / 普通重启后台 Mihomo 内核进程（设置页） |
 | `r` | 手动强制刷新数据与重载本地订阅 |
 | `q` / `Ctrl+C` | 退出客户端（内核继续常驻后台，代理不中断） |
@@ -179,32 +186,3 @@ chmod +x ./bin/mihomo         # macOS / Linux 确认可执行
 ```
 
 设置页 `Binary Image` 一行会显示程序**实际使用**的绝对路径，缺失时附 `[✘ MISSING]` 标记，可直接对照。
-
----
-
-## 目录结构
-
-```
-clash-tui/
-├── clash-tui.exe / clash-tui # 原生编译可执行程序（单二进制）
-├── bin/                      # Mihomo 内核放置目录 (mihomo.exe / mihomo)
-├── data/                     # 内核配置 (config.yaml)、DNS 覆盖 (dns.json) 与运行日志 (mihomo.log)
-├── profiles/                 # 本地订阅配置存档 (.yaml)
-├── subscriptions.json        # 订阅元数据存档
-├── rules.json                # 自定义域名路由规则存档
-├── src/                      # 全部 Rust 源码
-│   ├── main.rs               # 异步主事件循环、键盘交互、CLI 命令分发
-│   ├── app.rs                # 核心应用状态机、焦点管理、流量历史队列
-│   ├── ui.rs                 # Ratatui 现代界面渲染器、Sparkline 流量波形
-│   ├── theme.rs              # Cyber Neon HUD 调色板与组件样式定义
-│   ├── installer.rs          # 纯原生跨平台环境变量 PATH 配置与卸载
-│   ├── envproxy.rs           # 跨平台环境变量代理 (Windows 注册表 + Shell 脚本生成)
-│   ├── sysproxy.rs           # 跨平台系统代理切换 (WinINet / networksetup)
-│   ├── core.rs               # 内核进程管理、静默自启引导与 UAC 提权
-│   ├── kernelupdate.rs      # Mihomo 内核版本探测、GitHub 下载、解压替换与重启
-│   ├── subscriptions.rs      # 订阅增删改查、YAML 解析、配置热更新
-│   ├── rules.rs              # 自定义域名路由规则持久化与注入
-│   ├── dnsconf.rs            # DNS 覆盖配置持久化与 dns 段注入
-│   └── api.rs                # Mihomo RESTful 控制器交互客户端
-└── Cargo.toml                # Rust 项目清单
-```
