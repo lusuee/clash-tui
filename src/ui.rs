@@ -1379,103 +1379,226 @@ fn absolute_path_display(p: &std::path::Path) -> String {
 // ----------------------------------------------------------------------------
 // 9.5 Help overlay: all key bindings (`?`)
 // ----------------------------------------------------------------------------
-fn help_section(title: &'static str) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("◈ {title}"),
-        Style::default()
-            .fg(Theme::MAUVE)
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-    ))
+fn help_section(title: &'static str, width: u16) -> Line<'static> {
+    let accent = match title {
+        "GLOBAL" => Theme::CYAN,
+        "PROXIES" => Theme::GREEN,
+        "CONNECTIONS" => Theme::RED,
+        "SUBSCRIPTIONS" => Theme::YELLOW,
+        "SETTINGS" => Theme::PEACH,
+        "RULES" => Theme::MAUVE,
+        "DIALOGS" => Theme::LAVENDER,
+        _ => Theme::SUBTEXT0,
+    };
+    let fill = (width as usize).saturating_sub(title.len() + 3);
+    Line::from(vec![
+        Span::styled("◈ ", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            title,
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {}", "─".repeat(fill)),
+            Style::default().fg(Theme::SURFACE2),
+        ),
+    ])
 }
 
 fn help_row(key: &'static str, desc: &'static str) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!(" {key:<14}"),
-            Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
+            format!(" {key:<16}"),
+            Style::default()
+                .fg(Theme::LAVENDER)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(desc, Style::default().fg(Theme::TEXT)),
+        Span::styled(desc, Style::default().fg(Theme::SUBTEXT0)),
     ])
 }
 
-fn help_left_column() -> Vec<Line<'static>> {
+fn help_left_column(width: u16) -> Vec<Line<'static>> {
     vec![
-        help_section("GLOBAL"),
-        help_row("q / Ctrl+C", "退出（内核继续在后台运行）"),
+        help_section("GLOBAL", width),
+        help_row("q / Ctrl+C", "退出（内核继续后台运行）"),
         help_row("Q", "退出并停止内核"),
         help_row("? / Esc", "打开 / 关闭本帮助"),
-        help_row("Tab / Shift+Tab", "下一个 / 上一个标签页"),
-        help_row("1 … 5", "直达 Proxies / Conns / Subs / Settings / Rules"),
+        help_row("Tab / Shift+Tab", "切换标签页"),
+        help_row("1 … 5", "直达对应标签页"),
         help_row("j k ↑ ↓", "上下移动选中项"),
         help_row("g G Home End", "跳到首项 / 末项"),
         help_row("PgUp / PgDn", "整页滚动"),
-        help_row("h l ← →", "左右切换代理组 / 表单字段"),
-        help_row("Enter", "激活订阅 / 选择节点 / 确认"),
+        help_row("h l ← →", "左右切换代理组 / 字段"),
+        help_row("Enter", "激活订阅 / 选择节点"),
         help_row("m", "循环切换代理模式"),
-        help_row("p / e", "系统代理 / 环境变量代理"),
+        help_row("p / e", "系统代理 / 环境代理"),
         help_row("n", "TUN 虚拟网卡开关"),
         help_row("P", "修改混合代理端口"),
         help_row("r", "重载本地订阅与配置"),
+        Line::default(),
+        help_section("CONNECTIONS", width),
+        help_row("d / D", "关闭所选 / 全部连接"),
+        Line::default(),
+        help_section("PROXIES", width),
+        help_row("Enter", "切换所选组内节点"),
+        help_row("t / T", "测速节点 / 整组节点"),
+        help_row("o", "切换节点排序"),
     ]
 }
 
-fn help_right_column() -> Vec<Line<'static>> {
+fn help_right_column(width: u16) -> Vec<Line<'static>> {
     vec![
-        help_section("PROXIES"),
-        help_row("Enter", "切换所选组内的节点"),
-        help_row("t / T", "测速所选节点 / 整组节点"),
-        help_row("o", "切换节点排序（Default/Name/Ping）"),
-        help_section("CONNECTIONS"),
-        help_row("d / D", "关闭所选连接 / 全部连接"),
-        help_section("SUBSCRIPTIONS"),
+        help_section("SUBSCRIPTIONS", width),
         help_row("a", "新增订阅"),
         help_row("u / U", "更新所选 / 全部订阅"),
-        help_row("Enter", "激活订阅并重载内核"),
+        help_row("Enter", "激活并重载内核"),
         help_row("x", "删除所选订阅"),
-        help_section("SETTINGS"),
+        Line::default(),
+        help_section("SETTINGS", width),
         help_row("d", "DNS 覆盖编辑器"),
         help_row("K", "下载 / 更新 Mihomo 内核"),
-        help_row("U", "检查并安装 clash-tui 自身更新"),
-        help_row("s / S", "停止内核 / 重启内核"),
-        help_row("A", "以管理员身份运行内核"),
-        help_section("RULES"),
+        help_row("U", "检查并安装自身更新"),
+        help_row("s / S", "停止 / 重启内核"),
+        help_row("A", "以管理员运行内核"),
+        Line::default(),
+        help_section("RULES", width),
         help_row("a", "新增域名规则"),
-        help_row("t", "切换 DIRECT / PROXY 去向"),
+        help_row("t", "切换 DIRECT / PROXY"),
         help_row("x", "删除所选规则"),
-        help_section("弹窗内"),
+        Line::default(),
+        help_section("DIALOGS", width),
         help_row("Esc", "关闭弹窗"),
-        help_row("Tab / Shift+Tab", "下一个 / 上一个字段"),
+        help_row("Tab / Shift+Tab", "切换字段"),
         help_row("Space", "切换开关（DNS 弹窗）"),
         help_row("Enter", "保存并热重载"),
     ]
 }
 
 fn render_help_modal(f: &mut Frame, area: Rect) {
-    let popup = centered_rect(94, 92, area);
+    // 固定尺寸的紧凑对话框：内容约 24 行，不再撑满整屏留出大片空白。
+    let width = 96.min(area.width.saturating_sub(2)).max(40);
+    let height = 30.min(area.height.saturating_sub(2)).max(11);
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
     f.render_widget(Clear, popup);
 
     let block = Block::default()
         .title(Span::styled(
-            " ◈ KEY BINDINGS — 按 ? 或 Esc 关闭 ◈ ",
+            " ◈ KEY BINDINGS — 全量快捷键 ",
             Style::default()
                 .fg(Theme::LAVENDER)
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
-        .border_type(BorderType::Double)
+        .border_type(BorderType::Rounded)
         .border_style(Theme::active_border())
         .style(Style::default().bg(Theme::MANTLE));
 
     let inner = block.inner(popup);
     f.render_widget(block, popup);
+    let inner = inner.inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
 
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // 标题摘要 + 关闭提示
+            Constraint::Length(1), // 分隔线
+            Constraint::Min(0),    // 双栏按键表
+            Constraint::Length(1), // 分隔线
+            Constraint::Length(1), // 底部提示
+        ])
         .split(inner);
 
-    f.render_widget(Paragraph::new(help_left_column()), columns[0]);
-    f.render_widget(Paragraph::new(help_right_column()), columns[1]);
+    let head = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(24)])
+        .split(rows[0]);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " FULL KEY REFERENCE",
+                Style::default()
+                    .fg(Theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "   · 按作用域分组 · 共 35 项",
+                Style::default().fg(Theme::MUTED),
+            ),
+        ])),
+        head[0],
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "? / Esc 关闭 ",
+            Style::default().fg(Theme::MAUVE),
+        ))
+        .alignment(Alignment::Right),
+        head[1],
+    );
+
+    let rule = |w: u16| {
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(w as usize),
+            Style::default().fg(Theme::SURFACE2),
+        )))
+    };
+    f.render_widget(rule(inner.width), rows[1]);
+
+    let body = rows[2];
+    let left_width = body.width.saturating_sub(1) / 2;
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(left_width),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(body);
+
+    f.render_widget(
+        Paragraph::new(help_left_column(columns[0].width)),
+        columns[0],
+    );
+    let divider = vec![
+        Line::from(Span::styled("│", Style::default().fg(Theme::SURFACE2)));
+        body.height as usize
+    ];
+    f.render_widget(Paragraph::new(divider), columns[1]);
+    f.render_widget(
+        Paragraph::new(help_right_column(columns[2].width)),
+        columns[2],
+    );
+
+    f.render_widget(rule(inner.width), rows[3]);
+
+    let key = |k: &'static str| {
+        Span::styled(
+            k,
+            Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
+        )
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("▪ ", Style::default().fg(Theme::MAUVE)),
+            key("Tab"),
+            Span::styled(" 切换页面    ", Style::default().fg(Theme::SUBTEXT0)),
+            Span::styled("▪ ", Style::default().fg(Theme::MAUVE)),
+            key("1 … 5"),
+            Span::styled(" 直达    ", Style::default().fg(Theme::SUBTEXT0)),
+            Span::styled("▪ ", Style::default().fg(Theme::MAUVE)),
+            key("? / Esc / q"),
+            Span::styled(" 关闭帮助", Style::default().fg(Theme::SUBTEXT0)),
+        ]))
+        .alignment(Alignment::Center),
+        rows[4],
+    );
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -1501,6 +1624,16 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 // ----------------------------------------------------------------------------
 // 9. Footer & Status Deck
 // ----------------------------------------------------------------------------
+/// 窄终端下按键提示行会溢出：按「按键 + 说明」成对从尾部丢弃，避免半截词。
+fn fit_footer_line(spans: Vec<Span<'static>>, width: u16) -> Line<'static> {
+    let mut spans = spans;
+    while spans.len() > 2 && Line::from(spans.clone()).width() > width as usize {
+        spans.pop();
+        spans.pop();
+    }
+    Line::from(spans)
+}
+
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1574,13 +1707,13 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled("[K] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),
                 Span::raw("Kernel  "),
                 Span::styled("[U] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
-                Span::raw("Self-Update  "),
+                Span::raw("Update  "),
                 Span::styled("[P] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
                 Span::raw("Port  "),
                 Span::styled("[A] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),
                 Span::raw("Admin  "),
                 Span::styled("[s/S] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
-                Span::raw("Core Daemon"),
+                Span::raw("Core"),
             ]),
             ActiveTab::Rules => Line::from(vec![
                 Span::styled(" ◈ RULES: ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
@@ -1594,7 +1727,10 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw("Scroll"),
             ]),
         };
-        f.render_widget(Paragraph::new(hint_line), chunks[0]);
+        f.render_widget(
+            Paragraph::new(fit_footer_line(hint_line.spans, chunks[0].width)),
+            chunks[0],
+        );
     }
 
     // Global Command Deck
@@ -1618,7 +1754,10 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(" │ [?] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
         Span::styled("All Keys", Style::default().fg(Theme::SUBTEXT0)),
     ]);
-    f.render_widget(Paragraph::new(global_keys), chunks[1]);
+    f.render_widget(
+        Paragraph::new(fit_footer_line(global_keys.spans, chunks[1].width)),
+        chunks[1],
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -1691,5 +1830,70 @@ fn is_variation_selector(u: u32) -> bool {
 
 fn is_skin_tone(u: u32) -> bool {
     (0x1F3FB..=0x1F3FF).contains(&u)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
+    use ratatui::Terminal;
+
+    fn dump_buffer(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area;
+        let mut out = String::new();
+        for y in area.y..area.bottom() {
+            let row: String = (area.x..area.right())
+                .map(|x| {
+                    buffer
+                        .cell(Position::new(x, y))
+                        .map(|c| c.symbol())
+                        .unwrap_or(" ")
+                        .to_string()
+                })
+                .collect();
+            out.push_str(row.trim_end());
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn help_overlay_is_compact_and_fits_columns() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_help_modal(f, f.area()))
+            .unwrap();
+
+        let dump = dump_buffer(&terminal);
+        println!("{dump}");
+
+        // 弹窗只占内容所需高度（30 行），上下留出背景
+        assert_eq!(dump.lines().next().unwrap(), "");
+        assert!(dump.contains("KEY BINDINGS"));
+        assert!(dump.contains("FULL KEY REFERENCE"));
+        assert!(dump.contains("◈ GLOBAL"));
+        assert!(dump.contains("◈ SUBSCRIPTIONS"));
+        assert!(dump.contains("◈ DIALOGS"));
+        assert!(dump.replace(' ', "").contains("?/Esc关闭"));
+        // 双栏分隔线存在
+        assert!(dump.contains("│"));
+    }
+
+    #[test]
+    fn fit_footer_line_drops_tail_pairs_when_narrow() {
+        let spans = vec![
+            Span::raw("TITLE"),
+            Span::raw("[a] "),
+            Span::raw("Add  "),
+            Span::raw("[b] "),
+            Span::raw("Remove"),
+        ];
+        let line = fit_footer_line(spans, 12);
+        assert!(line.width() <= 12);
+        assert_eq!(line.width(), "TITLE".len());
+    }
 }
 
