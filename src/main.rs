@@ -1096,7 +1096,7 @@ fn resolve_working_dir() {
         Ok(p) => {
             let p = std::fs::canonicalize(&p).unwrap_or(p);
             match p.parent() {
-                Some(dir) => dir.to_path_buf(),
+                Some(dir) => strip_verbatim_prefix(dir.to_path_buf()),
                 None => return,
             }
         }
@@ -1109,4 +1109,21 @@ fn resolve_working_dir() {
     if dir_has_kernel(&exe_dir) || !looks_like_data_dir(&cwd) {
         let _ = std::env::set_current_dir(&exe_dir);
     }
+}
+
+/// 去掉 Windows `\\?\` 长路径前缀。
+///
+/// 把带前缀的目录设为进程工作目录后，mihomo 用它拼出来的路径是
+/// `\\?\D:\...\data/ASN.mmdb` 这种形式：前缀会禁用分隔符归一化，反斜杠+正斜杠
+/// 混用会被 Windows 判为非法路径，表现为 ASN/cache.db 删除失败等一连串错误。
+fn strip_verbatim_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
+    let s = path.to_string_lossy().to_string();
+    let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s
+    };
+    std::path::PathBuf::from(s)
 }

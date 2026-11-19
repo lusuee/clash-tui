@@ -385,19 +385,41 @@ where
     extract_archive(&archive_path, &tmp_path)?;
 
     let was_installed = target.is_file();
+    // REST 探测可能滞后（secret 不对/旧内核以管理员身份运行），这里再直接查进程，
+    // 避免“以为没在跑”就替换文件，结果旧进程继续占着 53/7897/9090，新内核起不来。
+    let had_core = was_running || CoreManager::process_alive();
     let mut backup: Option<PathBuf> = None;
 
     if was_installed {
-        // Windows 上替换被占用的 exe 前必须先停内核。
-        let _ = core.stop_core();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        if had_core {
+            let _ = core.stop_core();
+            // Windows 上正在运行的 exe 可以被改名，但进程不会因此退出；
+            // 必须确认进程真的没了，否则替换后新内核会因端口被占而立即退出。
+            let mut stopped = false;
+            for _ in 0..12 {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if !CoreManager::process_alive() {
+                    stopped = true;
+                    break;
+                }
+            }
+            if !stopped {
+                let _ = std::fs::remove_file(&tmp_path);
+                let _ = std::fs::remove_file(&archive_path);
+                return Err(
+                    "无法停止正在运行的内核（大概率它是以管理员身份启动的）。请用管理员身份运行 clash-tui，\
+                     或在管理员命令行执行 taskkill /F /IM mihomo.exe 后再试；旧内核与配置文件未被改动。"
+                        .to_string(),
+                );
+            }
+        }
 
         let backup_path = parent.join(format!("{file_name}.old"));
         let _ = std::fs::remove_file(&backup_path);
         if let Err(e) = std::fs::rename(&target, &backup_path) {
             let _ = std::fs::remove_file(&tmp_path);
             let _ = std::fs::remove_file(&archive_path);
-            if was_running {
+            if had_core {
                 let _ = core.start_core();
             }
             return Err(format!(
@@ -414,7 +436,7 @@ where
         }
         let _ = std::fs::remove_file(&tmp_path);
         let _ = std::fs::remove_file(&archive_path);
-        if was_running {
+        if had_core {
             let _ = core.start_core();
         }
         return Err(format!(
@@ -442,11 +464,26 @@ where
     };
 
     let mut restarted = false;
-    if was_running {
+    if had_core {
         match core.start_core() {
             Ok(_) => {
-                restarted = true;
-                message.push_str("，内核已重新启动");
+                // 端口被占/配置错误时，新进程会“启动成功但立刻退出”，必须再确认一次。
+                let mut up = false;
+                for _ in 0..12 {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    if CoreManager::process_alive() {
+                        up = true;
+                        break;
+                    }
+                }
+                restarted = up;
+                if up {
+                    message.push_str("，内核已重新启动");
+                } else {
+                    message.push_str(
+                        "；但新内核启动后立即退出（端口被占用或配置错误），详情见 data/mihomo.log，可按 S 重试",
+                    );
+                }
             }
             Err(e) => message.push_str(&format!("；内核重启失败: {e}（按 S 重试）")),
         }
@@ -454,8 +491,16 @@ where
         message.push_str("（内核未运行，按 S 启动）");
     }
 
+    // 新内核确认能运行后才删回滚点；否则保留 .old 便于手动恢复。
     if let Some(backup_path) = backup {
-        let _ = std::fs::remove_file(backup_path);
+        if !had_core || restarted {
+            let _ = std::fs::remove_file(&backup_path);
+        } else {
+            message.push_str(&format!(
+                "；旧内核备份保留在 {}",
+                backup_path.display()
+            ));
+        }
     }
 
     Ok(KernelUpdateReport {

@@ -224,8 +224,8 @@ clash-tui/
 1. 查 latest、读本地 `-v` 版本，`is_newer` 不成立即返回“已是最新”；
 2. 下载到 `data/kernel-download/`（直连失败自动回退 `http://127.0.0.1:<mixed-port>` 代理），进度经 `AppEvent::KernelProgress` 刷新状态卡；
 3. 解压到同目录临时文件（Windows `.zip` 中找 `*.exe` 且名字含 mihomo；unix `.gz` 直接解流）；
-4. 旧内核存在时先 `stop_core()`，旧文件改名为 `mihomo.exe.old` 作为回滚点，再原子 rename 新文件；失败会恢复备份并尽量重启；
-5. 原本在运行的内核用 `start_core()` 重启；清理下载文件/备份，结果经 `AppEvent::KernelUpdateDone` 写回状态栏与版本字段。
+4. 旧内核存在时先 `stop_core()`，并轮询 `CoreManager::process_alive()` 确认进程确实退出（以管理员身份启动的内核普通权限杀不掉，此时直接报错、旧内核与配置保持原样，绝不静默替换文件）；确认退出后旧文件改名为 `mihomo.exe.old` 作回滚点，再原子 rename 新文件；失败会恢复备份并尽量重启；
+5. 原本在运行的内核用 `start_core()` 重启，同样轮询确认新进程真的存活；清理下载文件，`.old` 备份只在新内核确认可运行后删除（否则保留并提示路径）；结果经 `AppEvent::KernelUpdateDone` 写回状态栏与版本字段。
 
 **交互**：Settings 卡片新增 `Kernel Binary` 行（磁盘版本 / 可更新版本 / 下载百分比）；`K`（Shift+K）触发。安装目录需要写权限（装在 `Program Files` 时需管理员运行 clash-tui），失败会在状态栏提示。
 

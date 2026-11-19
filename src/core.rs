@@ -6,6 +6,19 @@ pub struct CoreManager {
     pub data_dir: PathBuf,
 }
 
+/// 去掉 Windows `\\?\` 长路径前缀（提示信息与内核路径都更干净，也避免拼进日志里的非法路径）。
+fn strip_verbatim(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy().to_string();
+    let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s
+    };
+    PathBuf::from(s)
+}
+
 impl CoreManager {
     #[cfg(target_os = "windows")]
     const BIN_NAME: &'static str = "mihomo.exe";
@@ -42,11 +55,38 @@ impl CoreManager {
         self.bin_path.is_file()
     }
 
+    /// 是否仍有 mihomo 进程存在。
+    ///
+    /// 直接查进程而不是 REST：更新内核时必须确认旧进程真的退出了，
+    /// REST 探测在 secret 不匹配/内核以管理员身份启动时可能不可靠。
+    pub fn process_alive() -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            let out = std::process::Command::new("tasklist")
+                .args(["/FI", "IMAGENAME eq mihomo.exe", "/NH"])
+                .output();
+            match out {
+                Ok(o) => String::from_utf8_lossy(&o.stdout).lines().any(|line| {
+                    line.trim_start().to_ascii_lowercase().starts_with("mihomo.exe")
+                }),
+                Err(_) => false,
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::process::Command::new("pkill")
+                .args(["-0", "-f", "mihomo"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+    }
+
     /// 在 clash-tui 可执行文件所在目录中查找内核（`mihomo`、`bin/mihomo`、`bin/mihomo/mihomo`）。
     /// 返回绝对路径，供 cwd 中缺少内核时兜底使用。
     pub fn kernel_next_to_exe() -> Option<PathBuf> {
         let exe = std::env::current_exe().ok()?;
-        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+        let exe = strip_verbatim(std::fs::canonicalize(&exe).unwrap_or(exe));
         let dir = exe.parent()?;
         [
             dir.join(Self::BIN_NAME),
@@ -61,7 +101,7 @@ impl CoreManager {
     pub fn missing_hint(&self) -> String {
         let exe_dir = std::env::current_exe()
             .ok()
-            .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+            .map(|p| strip_verbatim(std::fs::canonicalize(&p).unwrap_or(p)))
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let install_dir = exe_dir
             .map(|d| d.display().to_string())
