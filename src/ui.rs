@@ -1,4 +1,5 @@
 use crate::app::{format_bytes, format_speed, ActiveTab, App, ModalField, ProxyFocus};
+use crate::kernelupdate;
 use crate::rules::RuleTarget;
 use crate::theme::Theme;
 use ratatui::{
@@ -751,11 +752,55 @@ fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
+    let disk_version = if app.kernel_bin_version == "Unknown" {
+        "未知版本".to_string()
+    } else {
+        format!("v{}", app.kernel_bin_version)
+    };
+    let (kernel_update_text, kernel_update_style) = if app.kernel_busy {
+        (
+            format!("[{:>3}%] 正在下载并更新...", app.kernel_progress),
+            Style::default()
+                .fg(Theme::YELLOW)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if let Some(latest) = &app.kernel_latest {
+        if kernelupdate::is_newer(latest, Some(&app.kernel_bin_version)) {
+            (
+                format!("v{latest} 可更新（本地 {disk_version}）  [K] 立即更新"),
+                Style::default()
+                    .fg(Theme::YELLOW)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            (
+                format!("v{latest} 已是最新  [K] 重新检查"),
+                Style::default().fg(Theme::MUTED),
+            )
+        }
+    } else if app.core_mgr.is_installed() {
+        (
+            format!("{disk_version} · [K] 检查更新"),
+            Style::default().fg(Theme::SUBTEXT0),
+        )
+    } else {
+        (
+            "[K] 下载并安装 Mihomo 内核".to_string(),
+            Style::default()
+                .fg(Theme::YELLOW)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+
     let core_lines = vec![
         Line::from(binary_line),
         Line::from(vec![
             Span::styled("◈ Engine Version:    ", Style::default().fg(Theme::SUBTEXT0)),
             Span::styled(format!("Mihomo {}", app.core_version), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled("◈ Kernel Binary:    ", Style::default().fg(Theme::SUBTEXT0)),
+            Span::styled(kernel_update_text, kernel_update_style),
         ]),
         Line::from(vec![
             Span::styled("◈ Daemon Lifecycle:  ", Style::default().fg(Theme::SUBTEXT0)),
@@ -1386,6 +1431,8 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw("TUN  "),
                 Span::styled("[d] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
                 Span::raw("DNS  "),
+                Span::styled("[K] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),
+                Span::raw("Kernel  "),
                 Span::styled("[P] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
                 Span::raw("Port  "),
                 Span::styled("[A] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),

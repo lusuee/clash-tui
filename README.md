@@ -42,6 +42,10 @@
   - 内置弹窗可覆盖订阅 DNS 的 `nameserver` / `fallback` / `proxy-server-nameserver` / `default-nameserver`，并支持自定义 `域名=服务器` 策略（`;` 分隔多条，写入 `dns.nameserver-policy`，优先于订阅同名策略）。
   - `DIRECT DNS POLICY` 开关（默认开启）控制是否为 DIRECT 规则自动补 `system` 策略，内网域名不再被公共 DNS 解析失败拖累。
   - 保存到 `data/dns.json`，立即合并进 `data/config.yaml` 并 REST 热重载；留空字段沿用订阅值。
+- ⬇️ **内核一键下载与更新 (Settings → `K`)**：
+  - 自动从官方 `MetaCubeX/mihomo` GitHub Release 探测最新版本，按当前平台挑选资产（Windows `.zip` / Linux、macOS `.gz`），下载解压后替换 `bin/mihomo`。
+  - 更新前自动停止内核并备份旧文件，写入成功后按需重启；GitHub 直连失败时自动回退到本地混合端口代理。
+  - 内核缺失时同一按键直接完成下载安装，无需再手动翻找内核文件。
 - 📊 **活跃连接追踪与控制**：
   - 实时监视活跃 TCP/UDP 连接、目标 Host、传输速率与命中分流规则。
   - 支持 `d` 终止单个连接，`D` 终止所有活动连接。
@@ -70,6 +74,7 @@
 | `d` | 终止选中的网络连接（连接页） / 打开 **DNS 覆盖编辑器**（设置页） |
 | `D` | 终止所有活动网络连接（连接页） |
 | `A` | **以管理员身份重启 Mihomo 内核 (UAC 提权)**（设置页） |
+| `K` (Shift+K) | **检查并下载/更新 Mihomo 内核**（设置页；自动停内核 → 替换 → 重启，缺失时直接安装） |
 | `s` / `S` | 手动终止 / 普通重启后台 Mihomo 内核进程（设置页） |
 | `r` | 手动强制刷新数据与重载本地订阅 |
 | `q` / `Ctrl+C` | 退出客户端（内核继续常驻后台，代理不中断） |
@@ -196,6 +201,7 @@ clash-tui/
 │   ├── envproxy.rs           # 跨平台环境变量代理 (Windows 注册表 + Shell 脚本生成)
 │   ├── sysproxy.rs           # 跨平台系统代理切换 (WinINet / networksetup)
 │   ├── core.rs               # 内核进程管理、静默自启引导与 UAC 提权
+│   ├── kernelupdate.rs      # Mihomo 内核版本探测、GitHub 下载、解压替换与重启
 │   ├── subscriptions.rs      # 订阅增删改查、YAML 解析、配置热更新
 │   ├── rules.rs              # 自定义域名路由规则持久化与注入
 │   ├── dnsconf.rs            # DNS 覆盖配置持久化与 dns 段注入

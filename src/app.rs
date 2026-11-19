@@ -2,6 +2,7 @@ use crate::api::{ClashClient, ConnectionItem, ProxyItem};
 use crate::core::CoreManager;
 use crate::dnsconf::{format_policies, parse_list, parse_policies, DnsManager, DnsSettings};
 use crate::envproxy::EnvProxy;
+use crate::kernelupdate;
 use crate::rules::{RuleManager, RuleTarget};
 use crate::subscriptions::SubscriptionManager;
 use crate::sysproxy::SysProxy;
@@ -83,6 +84,9 @@ pub struct DnsModal {
 
 pub struct App {
     pub client: ClashClient,
+    /// 内核 REST 地址与 secret（供后台任务判断内核是否真的在运行）
+    pub api_url: String,
+    pub core_secret: Option<String>,
     pub active_tab: ActiveTab,
     pub should_quit: bool,
     /// 通过 Q 退出时是否已成功停止内核（决定退出提示文案）
@@ -98,6 +102,14 @@ pub struct App {
     pub env_proxy_enabled: bool,
     pub tun_enabled: bool,
     pub status_msg: Option<(String, Instant)>,
+
+    // Kernel download/update (Settings → K)
+    /// 磁盘上内核二进制的版本（`mihomo -v`），不是 REST 报告的运行版本。
+    pub kernel_bin_version: String,
+    /// 最近一次检查得到的 GitHub latest 版本（不含 `v`）。
+    pub kernel_latest: Option<String>,
+    pub kernel_busy: bool,
+    pub kernel_progress: u8,
 
     // Traffic stats & History for Sparkline
     pub up_speed: u64,
@@ -159,9 +171,12 @@ impl App {
         let env_enabled = EnvProxy::get_status();
         let sub_mgr = SubscriptionManager::new();
         let core_mgr = CoreManager::new();
+        let kernel_bin_version = kernelupdate::installed_version(&core_mgr.bin_path);
 
         Self {
-            client: ClashClient::new(base_url, secret),
+            client: ClashClient::new(base_url, secret.clone()),
+            api_url: base_url.to_string(),
+            core_secret: secret,
             active_tab: ActiveTab::Proxies,
             should_quit: false,
             core_stopped_on_exit: false,
@@ -175,6 +190,11 @@ impl App {
             env_proxy_enabled: env_enabled,
             tun_enabled: false,
             status_msg: Some(("Connecting to Mihomo Core...".to_string(), Instant::now())),
+
+            kernel_bin_version: kernel_bin_version.unwrap_or_else(|| "Unknown".to_string()),
+            kernel_latest: None,
+            kernel_busy: false,
+            kernel_progress: 0,
 
             up_speed: 0,
             down_speed: 0,

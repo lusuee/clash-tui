@@ -4,6 +4,7 @@ mod core;
 mod dnsconf;
 mod envproxy;
 mod installer;
+mod kernelupdate;
 mod rules;
 mod subscriptions;
 mod sysproxy;
@@ -42,6 +43,8 @@ pub enum AppEvent {
     CoreActionDone(String),
     TunToggled(Result<bool, String>),
     PortChanged(Result<u16, String>),
+    KernelProgress(u8),
+    KernelUpdateDone(Result<kernelupdate::KernelUpdateReport, String>),
 }
 
 fn print_help() {
@@ -339,6 +342,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AppEvent::CoreActionDone(msg) => {
                     app.set_status(msg);
+                }
+                AppEvent::KernelProgress(pct) => {
+                    app.kernel_progress = pct.min(100);
+                }
+                AppEvent::KernelUpdateDone(res) => {
+                    app.kernel_busy = false;
+                    match res {
+                        Ok(report) => {
+                            app.kernel_latest = Some(report.latest.clone());
+                            if report.applied {
+                                app.kernel_bin_version = report.latest.clone();
+                            }
+                            if report.restarted {
+                                app.core_version = format!("v{}", report.latest);
+                            }
+                            app.set_status(report.message);
+                        }
+                        Err(e) => {
+                            app.kernel_progress = 0;
+                            app.set_status(format!("✘ 内核更新失败: {e}"));
+                        }
+                    }
                 }
                 AppEvent::TunToggled(res) => {
                     match res {
@@ -969,6 +994,39 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
                     };
                     let _ = tx_c.send(AppEvent::CoreActionDone(res));
                 });
+            }
+        }
+        KeyCode::Char('K') => {
+            if app.active_tab == ActiveTab::Settings {
+                if app.kernel_busy {
+                    app.set_status("内核更新正在进行中...");
+                } else {
+                    app.kernel_busy = true;
+                    app.kernel_progress = 0;
+                    app.set_status("检查 Mihomo 内核最新版本...");
+                    let core_mgr = CoreManager::new();
+                    let api_url = app.api_url.clone();
+                    let secret = app.core_secret.clone();
+                    let ui_says_running = app.is_core_running;
+                    let mixed_port = app.mixed_port;
+                    let tx_k = tx.clone();
+                    tokio::spawn(async move {
+                        // REST 可能滞后（刚启动、secret 错误）：以实时探测为准，避免停掉内核后忘了重启
+                        let was_running = core_mgr.is_running(&api_url, secret.as_deref()).await
+                            || ui_says_running;
+                        let tx_progress = tx_k.clone();
+                        let result = kernelupdate::update_kernel(
+                            &core_mgr,
+                            mixed_port,
+                            was_running,
+                            move |pct| {
+                                let _ = tx_progress.send(AppEvent::KernelProgress(pct));
+                            },
+                        )
+                        .await;
+                        let _ = tx_k.send(AppEvent::KernelUpdateDone(result));
+                    });
+                }
             }
         }
         KeyCode::Char('r') => {

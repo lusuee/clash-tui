@@ -63,6 +63,7 @@ clash-tui/
 | `src/ui.rs` | 纯渲染层（Cyber HUD 一体化面板、全息弹窗、Emoji 宽度安全排版），无业务逻辑 | `render`、`render_*_tab`、`render_add_sub_modal`、`render_dns_modal`、`format_display_name` |
 | `src/api.rs` | Mihomo REST 客户端（可 Clone，供 tokio task 持有） | `ClashClient` |
 | `src/core.rs` | Mihomo 内核守护进程生命周期管理 | `CoreManager::{start_core, stop_core, start_core_as_admin, is_running, ensure_default_config}` |
+| `src/kernelupdate.rs` | 内核下载/更新：GitHub Release 探测、资产选择、下载解压、替换并重启 | `KernelUpdateReport`、`update_kernel`、`latest_version`、`installed_version`、`extract_version` |
 | `src/subscriptions.rs` | 订阅 CRUD、下载解析、**生成本地生效配置** | `SubscriptionManager::{add, delete, set_active, update_subscription}`、`parse_node_count` |
 | `src/rules.rs` | 自定义域名路由规则：持久化、解析、YAML 注入 | `RuleManager`、`RuleTarget`、`parse_domain_input`、`resolve_proxy_target`、`inject_domain_rules`、`apply_rules_to_config` |
 | `src/dnsconf.rs` | DNS 覆盖配置：持久化 `data/dns.json`、`dns` 段注入与校验 | `DnsManager`、`DnsSettings`、`DnsPolicy`、`inject_dns_settings`、`parse_list`、`parse_policies` |
@@ -90,12 +91,13 @@ clash-tui/
 | `DelayResult { node, result }` | 按 `t`/`T` 触发的测速 task | 延迟结果 |
 | `SubUpdated / SubActivated` | 订阅更新/激活 task | 状态提示 + 触发重载 |
 | `CoreActionDone` | 内核启停 task | 状态提示 |
+| `KernelProgress / KernelUpdateDone` | 内核更新 task（Settings 页按 `K`） | 下载进度、更新结果与版本同步 |
 | `TunToggled / PortChanged` | TUN/端口修改 task | 回读实际状态并联动 SysProxy/EnvProxy |
 
 ### 4.2 启动流程（`main()`）
 
 1. 解析参数 `-u/--url`（默认 `http://127.0.0.1:9090`）、`--secret`；
-2. `resolve_working_dir()`：**工作目录解析**（全局安装的关键）。当前目录已存在 clash-tui 数据（`subscriptions.json` / `rules.json` / `bin/mihomo.exe` / `data/config.yaml` 任一）则保持 cwd；否则 `set_current_dir` 到 exe 所在目录——通过 PATH 全局启动时数据/内核跟随安装目录（`%LOCALAPPDATA%\clash-tui`，由 `install.bat` 创建），不会散落在用户任意 cwd；
+2. `resolve_working_dir()`：**工作目录解析**（全局安装的关键）。只认内核二进制：当前目录存在 `mihomo` / `bin/mihomo` / `bin/mihomo/mihomo` 才保持 cwd，否则 `set_current_dir` 到 exe 所在目录——`data/config.yaml`、`rules.json` 等是程序自己生成的产物，不能当作“这是数据目录”的证据，否则会被误写入的空目录永久劫持；
 3. `CoreManager::is_running()` 探测 → 未运行且已安装则 `start_core()`（detached 后台进程）；
 4. 设置 panic hook（恢复终端）→ 进入 AlternateScreen；
 5. 启动输入监听、流量轮询（1s）、慢速轮询（2.5s）三个 tokio task；
@@ -208,6 +210,26 @@ clash-tui/
 - 订阅无 `dns` 段时，只有用户显式提供 `nameserver` 才创建（`enable: true` + 默认 `default-nameserver`）；`dns.enable=false` 时仅用户显式覆盖且 nameserver 可用才启用。
 
 **流水线**：保存后写 `data/dns.json` → `rules::apply_rules_to_config()`（内部同时注入规则与 DNS）→ `reload_config` 热重载。订阅激活/更新写配置后同样重新注入，因此 DNS 覆盖不会被订阅更新冲掉。
+
+### 5.7 内核下载与更新（Settings 页，按键 `K`）
+
+**功能**：缺内核时一键下载；已安装时检查并升级到官方最新 Release，免去手动下载替换。
+
+**数据来源**（均为官方 `MetaCubeX/mihomo` GitHub Release）：
+- 最新版本：请求 `https://github.com/MetaCubeX/mihomo/releases/latest`，从跟随重定向后的 URL（`.../releases/tag/v1.19.34`）解析 tag，HTML 兜底同样支持；
+- 资产名按平台拼接：Windows `mihomo-windows-{amd64|arm64|386}-v{ver}.zip`，Linux `mihomo-linux-{amd64|arm64|386}-v{ver}.gz`，macOS `mihomo-darwin-{amd64|arm64}-v{ver}.gz`；
+- 本地版本：对 `bin/mihomo` 执行 `-v` 解析（不依赖运行中的 REST 版本，内核停止时也能判断是否需要下载）。
+
+**流程**（`kernelupdate::update_kernel`）：
+1. 查 latest、读本地 `-v` 版本，`is_newer` 不成立即返回“已是最新”；
+2. 下载到 `data/kernel-download/`（直连失败自动回退 `http://127.0.0.1:<mixed-port>` 代理），进度经 `AppEvent::KernelProgress` 刷新状态卡；
+3. 解压到同目录临时文件（Windows `.zip` 中找 `*.exe` 且名字含 mihomo；unix `.gz` 直接解流）；
+4. 旧内核存在时先 `stop_core()`，旧文件改名为 `mihomo.exe.old` 作为回滚点，再原子 rename 新文件；失败会恢复备份并尽量重启；
+5. 原本在运行的内核用 `start_core()` 重启；清理下载文件/备份，结果经 `AppEvent::KernelUpdateDone` 写回状态栏与版本字段。
+
+**交互**：Settings 卡片新增 `Kernel Binary` 行（磁盘版本 / 可更新版本 / 下载百分比）；`K`（Shift+K）触发。安装目录需要写权限（装在 `Program Files` 时需管理员运行 clash-tui），失败会在状态栏提示。
+
+**依赖**：Windows 用 `zip` crate，unix 用 `flate2`，均在 `Cargo.toml` 中按 target 引入。
 
 ---
 
