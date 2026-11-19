@@ -1,7 +1,7 @@
 use crate::api::{ClashClient, ConnectionItem, ProxyItem};
 use crate::core::CoreManager;
 use crate::envproxy::EnvProxy;
-use crate::rules::RuleManager;
+use crate::rules::{RuleManager, RuleTarget};
 use crate::subscriptions::SubscriptionManager;
 use crate::sysproxy::SysProxy;
 use ratatui::widgets::TableState;
@@ -60,6 +60,8 @@ pub struct AddSubModal {
 #[derive(Debug, Clone)]
 pub struct AddRuleModal {
     pub input: String,
+    /// 弹窗内选定的去向（Tab 切换），输入里的 `direct:` / `proxy:` 前缀优先
+    pub target: RuleTarget,
 }
 
 pub struct App {
@@ -622,9 +624,22 @@ impl App {
     }
 
     pub fn open_add_rule_modal(&mut self) {
+        let target = if self.rule_mgr.target_hint.eq_ignore_ascii_case("DIRECT") {
+            RuleTarget::Direct
+        } else {
+            RuleTarget::Proxy
+        };
         self.show_add_rule_modal = Some(AddRuleModal {
             input: String::new(),
+            target,
         });
+    }
+
+    /// 在添加规则弹窗内切换 DIRECT / PROXY
+    pub fn rule_modal_toggle_target(&mut self) {
+        if let Some(modal) = &mut self.show_add_rule_modal {
+            modal.target = modal.target.toggle();
+        }
     }
 
     pub fn close_modal(&mut self) {

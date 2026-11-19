@@ -34,7 +34,7 @@ clash-tui uninstall            # 卸载（移除 PATH，清理自启服务）
 | 全局安装/PATH管理 | `src/installer.rs`（纯原生注册/注销 PATH） |
 | 内核进程启停/开机自启/UAC 提权 | `src/core.rs`（静默 VBS + 计划任务/LaunchAgents/systemd） |
 | 订阅下载/激活/生效配置写入 | `src/subscriptions.rs` |
-| 自定义代理域名规则 | `src/rules.rs`（持久化 rules.json + YAML 注入） |
+| 自定义域名路由规则（DIRECT/PROXY） | `src/rules.rs`（持久化 rules.json + YAML 注入） |
 | 系统代理/环境变量代理 | `src/sysproxy.rs` / `src/envproxy.rs` |
 | 颜色样式 | `src/theme.rs`（统一走 `Theme::*`，勿硬编码色值） |
 

@@ -44,7 +44,7 @@ clash-tui/
 │                         # cache.db、geoip/geosite 数据、Rules/RuleSet
 ├── profiles/             # 订阅原始下载存档 {sub_id}.yaml（gitignored）
 ├── subscriptions.json    # 订阅元数据（gitignored，含私密 URL）
-├── rules.json            # 用户自定义代理域名规则（gitignored）
+├── rules.json            # 用户自定义域名路由规则（gitignored）
 ├── env.nu/.bat/.ps1/.sh  # 环境变量代理脚本（由 envproxy.rs 运行时生成，已跟踪）
 ├── run.bat               # 启动脚本：运行 target/release/clash-tui.exe
 ├── install.bat / uninstall.bat       # Windows 全局安装 / 卸载（%LOCALAPPDATA%\clash-tui + 用户 PATH）
@@ -64,7 +64,7 @@ clash-tui/
 | `src/api.rs` | Mihomo REST 客户端（可 Clone，供 tokio task 持有） | `ClashClient` |
 | `src/core.rs` | Mihomo 内核守护进程生命周期管理 | `CoreManager::{start_core, stop_core, start_core_as_admin, is_running, ensure_default_config}` |
 | `src/subscriptions.rs` | 订阅 CRUD、下载解析、**生成本地生效配置** | `SubscriptionManager::{add, delete, set_active, update_subscription}`、`parse_node_count` |
-| `src/rules.rs` | 自定义代理域名规则：持久化、解析、YAML 注入 | `RuleManager`、`parse_domain_input`、`resolve_proxy_target`、`inject_domain_rules`、`apply_rules_to_config` |
+| `src/rules.rs` | 自定义域名路由规则：持久化、解析、YAML 注入 | `RuleManager`、`RuleTarget`、`parse_domain_input`、`resolve_proxy_target`、`inject_domain_rules`、`apply_rules_to_config` |
 | `src/sysproxy.rs` | 系统代理（WinINet / macOS networksetup） | `SysProxy::{get_status, set_proxy}` |
 | `src/envproxy.rs` | 环境变量代理 + shell 脚本生成 | `EnvProxy::{get_status, set_env_proxy, generate_shell_scripts}` |
 | `src/theme.rs` | Cyber Neon HUD 调色板与组件样式 | `Theme::{GREEN, CYAN, LAVENDER, latency_badge, protocol_color, ...}` |
@@ -129,30 +129,30 @@ clash-tui/
 - reload 失败无自动重启（Python 旧版有 restart fallback，已移除），用户可按 `S` 重启内核；
 - Mock 订阅（URL 含 `example.com`/`demo`）返回假数据用于演示。
 
-### 5.2 自定义代理域名规则（Rules 页，按键 `5`）
+### 5.2 自定义域名路由规则（Rules 页，按键 `5`）
 
-**功能**：用户录入域名，使其流量强制走代理。
+**功能**：用户录入域名/关键字，并为每条规则单独指定去向——**DIRECT（直连）** 或 **PROXY（走代理组）**。
 
-**持久化** `rules.json`（JSON 数组）：
+**持久化** `rules.json`（JSON 数组；`target` 缺省为 `PROXY`，兼容旧存档）：
 
 ```json
 [
-  { "rule_type": "DOMAIN-SUFFIX", "value": "example.com" },
-  { "rule_type": "DOMAIN", "value": "api.example.com" },
-  { "rule_type": "DOMAIN-KEYWORD", "value": "openai" }
+  { "rule_type": "DOMAIN-SUFFIX", "value": "example.com", "target": "PROXY" },
+  { "rule_type": "DOMAIN", "value": "api.example.com", "target": "DIRECT" },
+  { "rule_type": "DOMAIN-KEYWORD", "value": "openai", "target": "PROXY" }
 ]
 ```
 
-**输入语法**（`parse_domain_input`）：`example.com` → DOMAIN-SUFFIX；`full:example.com` 或 `domain:...` → DOMAIN；`keyword:xxx` → DOMAIN-KEYWORD；`suffix:xxx` → DOMAIN-SUFFIX。含空格/逗号或空值视为非法。
+**输入语法**（`parse_domain_input` → `ParsedRuleInput`）：最前面可选去向前缀 `direct:` / `proxy:`（优先于弹窗内 `Tab` 选择），其后可选类型前缀：`example.com` → DOMAIN-SUFFIX；`full:example.com` 或 `domain:...` → DOMAIN；`keyword:xxx` → DOMAIN-KEYWORD；`suffix:xxx` → DOMAIN-SUFFIX；可组合为 `direct:full:api.example.com`。含空格/逗号或空值视为非法。
 
 **注入**（`inject_domain_rules`）：
 
-1. `resolve_proxy_target` 从 `data/config.yaml` 选目标代理组，优先级：
+1. `resolve_proxy_target` 从 `data/config.yaml` 选 PROXY 类规则使用的目标代理组，优先级：
    `proxy-groups` 中名字含 `proxy` 的组 → 第一个非 direct/reject 组 → 第一个组 → `proxies[0].name` → `DIRECT`；
-2. 生成规则行 `TYPE,VALUE,TARGET`，**插入 `rules` 列表最顶部**（Clash 规则自上而下匹配，顶部即最高优先级，先于订阅自带规则和 `MATCH`）；
+2. 生成规则行 `TYPE,VALUE,TARGET`：`target=Direct` 写 `DIRECT`，`target=Proxy` 写解析出的代理组名；**插入 `rules` 列表最顶部**（Clash 规则自上而下匹配，顶部即最高优先级，先于订阅自带规则和 `MATCH`）；
 3. 通过 `serde_yaml::Value` 操作，保留订阅配置其余字段不变。
 
-**生效时机**：`RuleManager::add/remove` 后、`subscriptions.rs` 两个写配置点之后，统一调用无状态函数 `apply_rules_to_config() -> (规则数, 目标组)`（内部重新读 rules.json + data/config.yaml），随后由调用方 `reload_config` 热重载。订阅切换/内核重启不丢规则。
+**生效时机**：`RuleManager::add/remove/toggle_target` 后、`subscriptions.rs` 两个写配置点之后，统一调用无状态函数 `apply_rules_to_config() -> (规则数, 目标组)`（内部重新读 rules.json + data/config.yaml），随后由调用方 `reload_config` 热重载。订阅切换/内核重启不丢规则。
 
 ### 5.3 代理控制三件套
 
@@ -185,7 +185,7 @@ clash-tui/
 | 文件 | 格式 | 写入者 | 说明 |
 |---|---|---|---|
 | `subscriptions.json` | `Vec<SubscriptionItem>`：`{id, name, url, active, node_count, last_updated}` | subscriptions.rs | id 格式 `sub_{unix_ts}`，同时是 profile 文件名 |
-| `rules.json` | `Vec<RuleItem>`：`{rule_type, value}` | rules.rs | 见 5.2 |
+| `rules.json` | `Vec<RuleItem>`：`{rule_type, value, target}` | rules.rs | 见 5.2 |
 | `profiles/{sub_id}.yaml` | 订阅原始内容（Clash YAML 或 base64 节点列表） | subscriptions.rs | 只存原始内容，不做加工 |
 | `data/config.yaml` | Mihomo 完整配置 | subscriptions.rs + rules.rs | 唯一生效配置，内核以 `-d data` 加载 |
 | `data/mihomo.log` | 追加日志 | mihomo 内核 | 排障入口 |

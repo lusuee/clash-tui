@@ -1,4 +1,5 @@
 use crate::app::{format_bytes, format_speed, ActiveTab, App, ModalField, ProxyFocus};
+use crate::rules::RuleTarget;
 use crate::theme::Theme;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
@@ -40,7 +41,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         render_add_sub_modal(f, modal);
     }
     if let Some(modal) = &app.show_add_rule_modal {
-        render_add_rule_modal(f, modal);
+        render_add_rule_modal(f, modal, &app.rule_mgr.target_hint);
     }
     if let Some(port_input) = &app.show_edit_port_modal {
         render_edit_port_modal(f, port_input);
@@ -636,7 +637,7 @@ fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
             ),
             Style::default().fg(Theme::MUTED),
         ),
-        Span::styled("│ TARGET: ", Style::default().fg(Theme::SURFACE2)),
+        Span::styled("│ PROXY GROUP: ", Style::default().fg(Theme::SURFACE2)),
         Span::styled(format!("[{}] ", app.rule_mgr.target_hint), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
     ]);
 
@@ -663,12 +664,17 @@ fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
             _ => (Theme::TEXT, "generic"),
         };
 
+        let (target_text, target_color) = match rule.target {
+            RuleTarget::Direct => ("➜ DIRECT", Theme::YELLOW),
+            RuleTarget::Proxy => ("➜ PROXY", Theme::TEAL),
+        };
+
         let cells = vec![
             Cell::from(format!("{}{}", pointer, rule.rule_type))
                 .style(Style::default().fg(rule_color).add_modifier(Modifier::BOLD)),
             Cell::from(rule.value.clone()),
             Cell::from(Span::styled(rule_desc, Style::default().fg(Theme::MUTED))),
-            Cell::from(Span::styled("➜ PROXY", Style::default().fg(Theme::TEAL))),
+            Cell::from(Span::styled(target_text, Style::default().fg(target_color).add_modifier(Modifier::BOLD))),
         ];
         rows.push(Row::new(cells).style(row_style));
     }
@@ -683,7 +689,7 @@ fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
         ],
     )
     .header(
-        Row::new(vec!["RULE TYPE", "DOMAIN PATTERN / KEYWORD", "MATCH STRATEGY", "TARGET"])
+        Row::new(vec!["RULE TYPE", "DOMAIN PATTERN / KEYWORD", "MATCH STRATEGY", "ROUTE TARGET"])
             .style(Style::default().fg(Theme::MUTED).add_modifier(Modifier::BOLD)),
     )
     .block(block);
@@ -926,13 +932,13 @@ fn render_add_sub_modal(f: &mut Frame, modal: &crate::app::AddSubModal) {
     f.render_widget(Paragraph::new(hint_line).alignment(Alignment::Center), chunks[2]);
 }
 
-fn render_add_rule_modal(f: &mut Frame, modal: &crate::app::AddRuleModal) {
-    let area = centered_rect(58, 28, f.area());
+fn render_add_rule_modal(f: &mut Frame, modal: &crate::app::AddRuleModal, proxy_group: &str) {
+    let area = centered_rect(62, 34, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
         .title(Span::styled(
-            " 󰃢 ADD DOMAIN PROXY RULE ",
+            " 󰃢 ADD DOMAIN ROUTE RULE ",
             Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
@@ -946,14 +952,36 @@ fn render_add_rule_modal(f: &mut Frame, modal: &crate::app::AddRuleModal) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // Hint
+            Constraint::Length(1), // Target selector
             Constraint::Length(3), // Input box
-            Constraint::Length(2), // Help
+            Constraint::Length(3), // Help
         ])
         .split(inner);
 
-    let hint = Paragraph::new("Target domain or keyword to route via proxy:")
+    let hint = Paragraph::new("Target domain or keyword (injected at the top of rules):")
         .style(Style::default().fg(Theme::SUBTEXT0));
     f.render_widget(hint, chunks[0]);
+
+    // 去向选择器：Tab / ← / → 切换，输入里的 direct: / proxy: 前缀优先
+    let target_color = match modal.target {
+        RuleTarget::Direct => Theme::YELLOW,
+        RuleTarget::Proxy => Theme::TEAL,
+    };
+    let target_desc = match modal.target {
+        RuleTarget::Direct => "直连，不经过代理".to_string(),
+        RuleTarget::Proxy => format!("走代理组 [{}]", proxy_group),
+    };
+    let target_line = Line::from(vec![
+        Span::styled(" TARGET ", Style::default().fg(Theme::SUBTEXT0)),
+        Span::styled("◀ ", Style::default().fg(Theme::MUTED)),
+        Span::styled(
+            format!(" {} ", modal.target.as_str()),
+            Style::default().fg(target_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ▶  ", Style::default().fg(Theme::MUTED)),
+        Span::styled(target_desc, Style::default().fg(Theme::SUBTEXT0)),
+    ]);
+    f.render_widget(Paragraph::new(target_line), chunks[1]);
 
     let input_block = Block::default()
         .borders(Borders::ALL)
@@ -964,25 +992,33 @@ fn render_add_rule_modal(f: &mut Frame, modal: &crate::app::AddRuleModal) {
         Span::styled(modal.input.as_str(), Style::default().fg(Theme::TEXT).add_modifier(Modifier::BOLD)),
         Span::styled("█", Style::default().fg(Theme::CYAN)),
     ]);
-    f.render_widget(Paragraph::new(input_text).block(input_block), chunks[1]);
+    f.render_widget(Paragraph::new(input_text).block(input_block), chunks[2]);
 
     let help_text = vec![
         Line::from(vec![
             Span::styled("example.com", Style::default().fg(Theme::GREEN)),
-            Span::raw(" ➜ DOMAIN-SUFFIX │ "),
-            Span::styled("full:example.com", Style::default().fg(Theme::MAUVE)),
-            Span::raw(" ➜ DOMAIN │ "),
-            Span::styled("keyword:google", Style::default().fg(Theme::PEACH)),
-            Span::raw(" ➜ KEYWORD"),
+            Span::raw(" → 后缀 │ "),
+            Span::styled("full:host", Style::default().fg(Theme::MAUVE)),
+            Span::raw(" → 精确 │ "),
+            Span::styled("keyword:xxx", Style::default().fg(Theme::PEACH)),
+            Span::raw(" → 关键字"),
         ]),
         Line::from(vec![
-            Span::styled("[Enter] ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-            Span::raw("Save & Reload   "),
-            Span::styled("[Esc] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
-            Span::raw("Dismiss"),
+            Span::styled("direct:example.com", Style::default().fg(Theme::YELLOW)),
+            Span::raw(" 可覆盖 TARGET 选择（直连）│ "),
+            Span::styled("proxy:xxx", Style::default().fg(Theme::TEAL)),
+            Span::raw(" 强制走代理"),
+        ]),
+        Line::from(vec![
+            Span::styled("[Tab]", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::raw(" 切换目标  "),
+            Span::styled("[Enter]", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+            Span::raw(" 保存并热重载  "),
+            Span::styled("[Esc]", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
+            Span::raw(" 取消"),
         ]),
     ];
-    f.render_widget(Paragraph::new(help_text).alignment(Alignment::Center), chunks[2]);
+    f.render_widget(Paragraph::new(help_text).alignment(Alignment::Center), chunks[3]);
 }
 
 fn render_edit_port_modal(f: &mut Frame, port_input: &str) {
@@ -1148,6 +1184,8 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(" ◈ RULES: ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
                 Span::styled("[a] ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
                 Span::raw("Add Domain  "),
+                Span::styled("[t] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+                Span::raw("Toggle DIRECT/PROXY  "),
                 Span::styled("[x] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
                 Span::raw("Delete  "),
                 Span::styled("[PgUp/Dn] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),

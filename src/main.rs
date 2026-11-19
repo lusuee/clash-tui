@@ -493,6 +493,9 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
             KeyCode::Esc => {
                 app.close_modal();
             }
+            KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+                app.rule_modal_toggle_target();
+            }
             KeyCode::Backspace => {
                 app.rule_modal_backspace();
             }
@@ -505,13 +508,16 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
                     if text.is_empty() {
                         app.set_status("✘ 域名不能为空");
                     } else {
-                        match app.rule_mgr.add(&text) {
+                        match app.rule_mgr.add(&text, modal.target) {
                             Some(item) => {
                                 let (count, target) = rules::apply_rules_to_config();
                                 app.rule_mgr.target_hint = target;
                                 app.set_status(format!(
-                                    "✔ 已添加规则 {} {} (共 {} 条，热重载中...)",
-                                    item.rule_type, item.value, count
+                                    "✔ 已添加规则 {} {} → {} (共 {} 条，热重载中...)",
+                                    item.rule_type,
+                                    item.value,
+                                    item.target.as_str(),
+                                    count
                                 ));
                                 let client = app.client.clone();
                                 let full_path = get_clean_config_path();
@@ -724,6 +730,24 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
                         });
                     });
                     app.set_status(format!("Testing ping for [{}]...", node));
+                }
+            } else if app.active_tab == ActiveTab::Rules && !app.rule_mgr.rules.is_empty() {
+                let idx = app.selected_rule_idx;
+                if let Some(item) = app.rule_mgr.toggle_target(idx) {
+                    let (count, target) = rules::apply_rules_to_config();
+                    app.rule_mgr.target_hint = target;
+                    app.set_status(format!(
+                        "✔ 规则 {} {} 已切换为 {} (共 {} 条，热重载中...)",
+                        item.rule_type,
+                        item.value,
+                        item.target.as_str(),
+                        count
+                    ));
+                    let client = app.client.clone();
+                    let full_path = get_clean_config_path();
+                    tokio::spawn(async move {
+                        let _ = client.reload_config(&full_path).await;
+                    });
                 }
             }
         }
