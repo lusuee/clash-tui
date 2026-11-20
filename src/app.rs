@@ -4,6 +4,7 @@ use crate::core::CoreManager;
 use crate::dnsconf::{format_policies, parse_list, parse_policies, DnsManager, DnsSettings};
 use crate::envproxy::EnvProxy;
 use crate::kernelupdate;
+use crate::overrides::{OverridesManager, OverridesSettings};
 use crate::rules::{RuleManager, RuleTarget};
 use crate::subscriptions::SubscriptionManager;
 use crate::sysproxy::SysProxy;
@@ -58,13 +59,24 @@ pub struct AddSubModal {
     pub name_input: String,
     pub url_input: String,
     pub active_field: ModalField,
+    /// `Some(id)` 表示编辑已有订阅，`None` 表示新增
+    pub editing_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct AddRuleModal {
     pub input: String,
-    /// 弹窗内选定的去向（Tab 切换），输入里的 `direct:` / `proxy:` 前缀优先
+    /// 弹窗内选定的去向（Tab 循环），输入里的 `direct:` / `proxy:` 前缀优先
     pub target: RuleTarget,
+    /// 去向为 PROXY 时指定的策略组；None 表示沿用解析出的默认代理组
+    pub group: Option<String>,
+}
+
+/// 规则命中推演弹窗
+#[derive(Debug, Clone)]
+pub struct RuleTestModal {
+    pub input: String,
+    pub report: Option<crate::rules::ProbeReport>,
 }
 
 /// DNS 弹窗的字段数：0 为 DIRECT 系统 DNS 开关，1..=5 为文本字段
@@ -80,6 +92,39 @@ pub struct DnsModal {
     pub policies: String,
     /// 当前焦点：0 = DIRECT 策略开关；1 = nameserver；2 = fallback；
     /// 3 = proxy-server-nameserver；4 = default-nameserver；5 = 域名策略
+    pub active_field: usize,
+}
+
+/// 内核体检弹窗（Settings → `H`）
+#[derive(Debug, Clone)]
+pub struct HealthModal {
+    pub items: Vec<crate::diagnostics::HealthItem>,
+    pub generated: String,
+    pub loading: bool,
+}
+
+/// 内核日志查看弹窗（Settings → `L`）
+#[derive(Debug, Clone)]
+pub struct LogModal {
+    pub filter: String,
+    pub lines: Vec<String>,
+    pub error: Option<String>,
+    pub generated: String,
+    pub loading: bool,
+}
+
+/// 运行配置覆盖弹窗的字段数
+pub const OVERRIDES_MODAL_FIELDS: usize = 5;
+
+/// 运行配置覆盖弹窗（Settings → `C`）
+#[derive(Debug, Clone)]
+pub struct OverridesModal {
+    pub mode: Option<String>,
+    pub log_level: Option<String>,
+    pub allow_lan: Option<bool>,
+    pub ipv6: Option<bool>,
+    pub unified_delay: Option<bool>,
+    /// 当前焦点：0 mode / 1 log-level / 2 allow-lan / 3 ipv6 / 4 unified-delay
     pub active_field: usize,
 }
 
@@ -148,6 +193,8 @@ pub struct App {
     pub sub_mgr: SubscriptionManager,
     pub selected_sub_idx: usize,
     pub updating_subs: HashSet<String>,
+    /// 上次自动更新检查时间（Tick 中节流用）
+    pub last_sub_auto_check: Instant,
 
     // Domain Rules View
     pub rule_mgr: RuleManager,
@@ -156,14 +203,24 @@ pub struct App {
     // DNS Overrides (Settings → DNS modal)
     pub dns_mgr: DnsManager,
 
+    // Runtime Overrides (Settings → C)
+    pub overrides_mgr: OverridesManager,
+
     // Core Daemon
     pub core_mgr: CoreManager,
 
     // Modals
     pub show_add_sub_modal: Option<AddSubModal>,
     pub show_add_rule_modal: Option<AddRuleModal>,
+    pub show_rule_test_modal: Option<RuleTestModal>,
     pub show_edit_port_modal: Option<String>,
     pub show_dns_modal: Option<DnsModal>,
+    /// 内核体检（Settings → H）
+    pub show_health_modal: Option<HealthModal>,
+    /// 内核日志查看（Settings → L）
+    pub show_logs_modal: Option<LogModal>,
+    /// 运行配置覆盖（Settings → C）
+    pub show_overrides_modal: Option<OverridesModal>,
     /// 快捷键帮助浮层（`?` 打开，Esc/`?`/`q` 关闭）
     pub show_help: bool,
 
@@ -237,17 +294,23 @@ impl App {
             sub_mgr,
             selected_sub_idx: 0,
             updating_subs: HashSet::new(),
+            last_sub_auto_check: Instant::now(),
 
             rule_mgr: RuleManager::new(),
             selected_rule_idx: 0,
 
             dns_mgr: DnsManager::new(),
+            overrides_mgr: OverridesManager::new(),
 
             core_mgr,
             show_add_sub_modal: None,
             show_add_rule_modal: None,
+            show_rule_test_modal: None,
             show_edit_port_modal: None,
             show_dns_modal: None,
+            show_overrides_modal: None,
+            show_health_modal: None,
+            show_logs_modal: None,
             show_help: false,
 
             groups_table_state: TableState::default(),
@@ -684,10 +747,27 @@ impl App {
             name_input: String::new(),
             url_input: String::new(),
             active_field: ModalField::Name,
+            editing_id: None,
+        });
+    }
+
+    /// 打开编辑订阅弹窗（预填当前选中订阅的名称/URL）
+    pub fn open_edit_sub_modal(&mut self) {
+        let Some(sub) = self.sub_mgr.subscriptions.get(self.selected_sub_idx).cloned() else {
+            self.set_status("没有可编辑的订阅");
+            return;
+        };
+        self.show_add_sub_modal = Some(AddSubModal {
+            name_input: sub.name,
+            url_input: sub.url,
+            active_field: ModalField::Name,
+            editing_id: Some(sub.id),
         });
     }
 
     pub fn open_add_rule_modal(&mut self) {
+        // 配置可能已被订阅更新/内核重载改写，打开弹窗前刷新可选策略组
+        self.rule_mgr.groups = crate::rules::config_proxy_groups();
         let target = if self.rule_mgr.target_hint.eq_ignore_ascii_case("DIRECT") {
             RuleTarget::Direct
         } else {
@@ -696,19 +776,244 @@ impl App {
         self.show_add_rule_modal = Some(AddRuleModal {
             input: String::new(),
             target,
+            group: None,
         });
     }
 
-    /// 在添加规则弹窗内切换 DIRECT / PROXY
-    pub fn rule_modal_toggle_target(&mut self) {
+    /// 在添加规则弹窗内循环目的地：DIRECT → 默认代理组 → 各可选策略组
+    pub fn rule_modal_cycle_destination(&mut self) {
+        let states = self.rule_mgr.destinations();
         if let Some(modal) = &mut self.show_add_rule_modal {
-            modal.target = modal.target.toggle();
+            let pos = states
+                .iter()
+                .position(|(t, g)| *t == modal.target && g.as_deref() == modal.group.as_deref())
+                .unwrap_or(0);
+            let (target, group) = states[(pos + 1) % states.len()].clone();
+            modal.target = target;
+            modal.group = group;
+        }
+    }
+
+    pub fn open_rule_test_modal(&mut self) {
+        self.show_rule_test_modal = Some(RuleTestModal {
+            input: String::new(),
+            report: None,
+        });
+    }
+
+    pub fn close_rule_test_modal(&mut self) {
+        self.show_rule_test_modal = None;
+    }
+
+    /// 用当前生效配置对输入域名做命中推演
+    pub fn rule_test_run(&mut self) {
+        let Some(modal) = &self.show_rule_test_modal else {
+            return;
+        };
+        let input = modal.input.trim().to_string();
+        if input.is_empty() {
+            self.set_status("✘ 请输入要推演的域名");
+            return;
+        }
+        match crate::rules::probe_domain_from_config(&input) {
+            Some(report) => {
+                let summary = match &report.outcome {
+                    crate::rules::ProbeOutcome::Match { index, rule } => {
+                        format!("命中第 {} 条规则：{}", index + 1, rule)
+                    }
+                    crate::rules::ProbeOutcome::KernelOnly { index, rule } => {
+                        format!("第 {} 条规则需内核解析：{}", index + 1, rule)
+                    }
+                    crate::rules::ProbeOutcome::NoMatch => {
+                        "未命中任何规则（使用 mihomo 默认策略）".to_string()
+                    }
+                };
+                self.set_status(format!("✔ 推演 {} → {}", report.domain, summary));
+                if let Some(modal) = &mut self.show_rule_test_modal {
+                    modal.report = Some(report);
+                }
+            }
+            None => self.set_status("✘ 无法读取 data/config.yaml 或域名为空"),
+        }
+    }
+
+    pub fn rule_test_handle_char(&mut self, c: char) {
+        if let Some(modal) = &mut self.show_rule_test_modal {
+            modal.input.push(c);
+        }
+    }
+
+    pub fn rule_test_backspace(&mut self) {
+        if let Some(modal) = &mut self.show_rule_test_modal {
+            modal.input.pop();
+            modal.report = None;
         }
     }
 
     pub fn close_modal(&mut self) {
         self.show_add_sub_modal = None;
         self.show_add_rule_modal = None;
+        self.show_rule_test_modal = None;
+    }
+
+    // Health modal (Settings → H)
+    pub fn open_health_modal(&mut self) {
+        self.show_health_modal = Some(HealthModal {
+            items: Vec::new(),
+            generated: String::new(),
+            loading: true,
+        });
+    }
+
+    pub fn close_health_modal(&mut self) {
+        self.show_health_modal = None;
+    }
+
+    pub fn set_health_items(&mut self, items: Vec<crate::diagnostics::HealthItem>) {
+        if let Some(modal) = &mut self.show_health_modal {
+            modal.items = items;
+            modal.loading = false;
+            modal.generated = chrono::Local::now().format("%H:%M:%S").to_string();
+        }
+    }
+
+    // Kernel log modal (Settings → L)
+    pub fn open_logs_modal(&mut self) {
+        self.show_logs_modal = Some(LogModal {
+            filter: String::new(),
+            lines: Vec::new(),
+            error: None,
+            generated: String::new(),
+            loading: true,
+        });
+    }
+
+    pub fn close_logs_modal(&mut self) {
+        self.show_logs_modal = None;
+    }
+
+    pub fn set_log_lines(&mut self, result: Result<Vec<String>, String>) {
+        if let Some(modal) = &mut self.show_logs_modal {
+            modal.loading = false;
+            modal.generated = chrono::Local::now().format("%H:%M:%S").to_string();
+            match result {
+                Ok(lines) => {
+                    modal.lines = lines;
+                    modal.error = None;
+                }
+                Err(e) => {
+                    modal.lines.clear();
+                    modal.error = Some(e);
+                }
+            }
+        }
+    }
+
+    pub fn log_modal_handle_char(&mut self, c: char) {
+        if let Some(modal) = &mut self.show_logs_modal {
+            if modal.filter.len() < 120 {
+                modal.filter.push(c);
+            }
+        }
+    }
+
+    pub fn log_modal_backspace(&mut self) {
+        if let Some(modal) = &mut self.show_logs_modal {
+            modal.filter.pop();
+        }
+    }
+
+    // Runtime overrides modal (Settings → C)
+    pub fn open_overrides_modal(&mut self) {
+        let settings = self.overrides_mgr.settings.clone();
+        self.show_overrides_modal = Some(OverridesModal {
+            mode: settings.mode,
+            log_level: settings.log_level,
+            allow_lan: settings.allow_lan,
+            ipv6: settings.ipv6,
+            unified_delay: settings.unified_delay,
+            active_field: 0,
+        });
+    }
+
+    pub fn close_overrides_modal(&mut self) {
+        self.show_overrides_modal = None;
+    }
+
+    pub fn overrides_modal_next_field(&mut self) {
+        if let Some(modal) = &mut self.show_overrides_modal {
+            modal.active_field = (modal.active_field + 1) % OVERRIDES_MODAL_FIELDS;
+        }
+    }
+
+    pub fn overrides_modal_prev_field(&mut self) {
+        if let Some(modal) = &mut self.show_overrides_modal {
+            modal.active_field = (modal.active_field + OVERRIDES_MODAL_FIELDS - 1)
+                % OVERRIDES_MODAL_FIELDS;
+        }
+    }
+
+    /// 空格 / 方向键：在「沿用订阅 → 各合法取值 → 关闭」之间循环当前字段
+    pub fn overrides_modal_cycle_value(&mut self) {
+        let Some(modal) = &mut self.show_overrides_modal else {
+            return;
+        };
+        match modal.active_field {
+            0 => {
+                modal.mode = match modal.mode.as_deref() {
+                    None => Some("rule".to_string()),
+                    Some("rule") => Some("global".to_string()),
+                    Some("global") => Some("direct".to_string()),
+                    _ => None,
+                }
+            }
+            1 => {
+                modal.log_level = match modal.log_level.as_deref() {
+                    None => Some("silent".to_string()),
+                    Some("silent") => Some("error".to_string()),
+                    Some("error") => Some("warning".to_string()),
+                    Some("warning") => Some("info".to_string()),
+                    Some("info") => Some("debug".to_string()),
+                    _ => None,
+                }
+            }
+            field => {
+                let slot = match field {
+                    2 => &mut modal.allow_lan,
+                    3 => &mut modal.ipv6,
+                    _ => &mut modal.unified_delay,
+                };
+                *slot = match *slot {
+                    None => Some(true),
+                    Some(true) => Some(false),
+                    Some(false) => None,
+                };
+            }
+        }
+    }
+
+    /// 当前弹窗内容转设置（值都来自循环选择，必然合法）
+    pub fn overrides_modal_to_settings(&self) -> Result<OverridesSettings, String> {
+        let modal = self
+            .show_overrides_modal
+            .as_ref()
+            .ok_or("运行时配置弹窗未打开")?;
+        Ok(OverridesSettings {
+            mode: modal.mode.clone(),
+            log_level: modal.log_level.clone(),
+            allow_lan: modal.allow_lan,
+            ipv6: modal.ipv6,
+            unified_delay: modal.unified_delay,
+        })
+    }
+
+    /// 保存弹窗内容：写 data/overrides.json + 重新注入 config.yaml（调用方负责热重载）
+    pub fn save_overrides_from_modal(&mut self) -> Result<OverridesSettings, String> {
+        let settings = self.overrides_modal_to_settings()?;
+        self.overrides_mgr.settings = settings.clone();
+        self.overrides_mgr.save();
+        self.close_overrides_modal();
+        Ok(settings)
     }
 
     pub fn rule_modal_handle_char(&mut self, c: char) {

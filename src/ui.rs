@@ -1,15 +1,16 @@
 use crate::app::{format_bytes, format_speed, ActiveTab, App, ModalField, ProxyFocus};
 use crate::appupdate;
 use crate::kernelupdate;
-use crate::rules::RuleTarget;
+use crate::rules::{ProbeOutcome, RuleTarget};
+use crate::subscriptions::{auto_update_label, SubscriptionItem};
 use crate::theme::Theme;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{
         Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, Sparkline, Table, Tabs,
+        ScrollbarState, Sparkline, Table, Tabs, Wrap,
     },
     Frame,
 };
@@ -43,10 +44,22 @@ pub fn render(f: &mut Frame, app: &mut App) {
         render_add_sub_modal(f, modal);
     }
     if let Some(modal) = &app.show_add_rule_modal {
-        render_add_rule_modal(f, modal, &app.rule_mgr.target_hint);
+        render_add_rule_modal(f, modal, &app.rule_mgr);
+    }
+    if let Some(modal) = &app.show_rule_test_modal {
+        render_rule_test_modal(f, modal);
     }
     if let Some(modal) = &app.show_dns_modal {
         render_dns_modal(f, modal);
+    }
+    if let Some(modal) = &app.show_overrides_modal {
+        render_overrides_modal(f, modal);
+    }
+    if let Some(modal) = &app.show_health_modal {
+        render_health_modal(f, modal);
+    }
+    if let Some(modal) = &app.show_logs_modal {
+        render_logs_modal(f, modal);
     }
     if let Some(port_input) = &app.show_edit_port_modal {
         render_edit_port_modal(f, port_input);
@@ -497,12 +510,27 @@ fn render_connections_tab(f: &mut Frame, app: &mut App, area: Rect) {
             Span::raw(format_bytes(conn.download)),
         ]);
 
+        let process = conn
+            .metadata
+            .process_path
+            .as_deref()
+            .and_then(|p| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()))
+            .map(|n| n.trim_end_matches(".exe").to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "—".to_string());
+        let process = if process.chars().count() > 18 {
+            format!("{}…", process.chars().take(17).collect::<String>())
+        } else {
+            process
+        };
+
         let cells = vec![
             Cell::from(format!("{}{}", pointer, host_port)),
             Cell::from(Span::styled(format!(" {} ", network), Style::default().fg(net_color).add_modifier(Modifier::BOLD))),
             Cell::from(transfer_line),
             Cell::from(Span::styled(format!("[{}]", conn.rule), Style::default().fg(Theme::YELLOW))),
             Cell::from(chains),
+            Cell::from(Span::styled(process, Style::default().fg(Theme::SUBTEXT0))),
         ];
         rows.push(Row::new(cells).style(row_style));
     }
@@ -510,15 +538,16 @@ fn render_connections_tab(f: &mut Frame, app: &mut App, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(30),
+            Constraint::Percentage(28),
             Constraint::Length(8),
-            Constraint::Length(24),
-            Constraint::Percentage(16),
-            Constraint::Percentage(22),
+            Constraint::Length(22),
+            Constraint::Percentage(15),
+            Constraint::Percentage(18),
+            Constraint::Percentage(12),
         ],
     )
     .header(
-        Row::new(vec!["DESTINATION ENDPOINT", "NET", "DATA TRANSFER", "ROUTING RULE", "PROXY CHAIN"])
+        Row::new(vec!["DESTINATION ENDPOINT", "NET", "DATA TRANSFER", "ROUTING RULE", "PROXY CHAIN", "PROCESS"])
             .style(Style::default().fg(Theme::MUTED).add_modifier(Modifier::BOLD)),
     )
     .block(block);
@@ -552,6 +581,11 @@ fn render_subscriptions_tab(f: &mut Frame, app: &mut App, area: Rect) {
             ),
             Style::default().fg(Theme::MUTED),
         ),
+        Span::styled("│ AUTO: ", Style::default().fg(Theme::SURFACE2)),
+        Span::styled(
+            format!("{} ", auto_update_label(app.sub_mgr.auto_update_minutes)),
+            Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD),
+        ),
     ]);
 
     let block = Block::default()
@@ -560,6 +594,7 @@ fn render_subscriptions_tab(f: &mut Frame, app: &mut App, area: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Theme::active_border());
 
+    let now_ts = chrono::Utc::now().timestamp();
     let mut rows = Vec::new();
     for (idx, sub) in app.sub_mgr.subscriptions.iter().enumerate() {
         let is_selected = idx == app.selected_sub_idx;
@@ -578,7 +613,7 @@ fn render_subscriptions_tab(f: &mut Frame, app: &mut App, area: Rect) {
         };
 
         let node_cell = if is_updating && sub.node_count == 0 {
-            Span::styled("⟳ fetching...", Style::default().fg(Theme::SAPPHIRE))
+            Span::styled("⟳ fetch...", Style::default().fg(Theme::SAPPHIRE))
         } else {
             Span::styled(
                 format!("◈ {} nodes", sub.node_count),
@@ -592,10 +627,15 @@ fn render_subscriptions_tab(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(format!("󰅐 {}", sub.last_updated), Style::default().fg(Theme::MUTED))
         };
 
+        let (traffic_text, traffic_style) = traffic_cell(sub);
+        let (expiry_text, expiry_style) = expiry_cell(sub, now_ts);
+
         let cells = vec![
             Cell::from(Span::styled(format!("{}{}", pointer, active_badge), active_style)),
             Cell::from(format_display_name(&sub.name)),
             Cell::from(node_cell),
+            Cell::from(Span::styled(traffic_text, traffic_style)),
+            Cell::from(Span::styled(expiry_text, expiry_style)),
             Cell::from(sync_cell),
             Cell::from(Span::styled(sub.url.clone(), Style::default().fg(Theme::SUBTEXT0))),
         ];
@@ -606,14 +646,16 @@ fn render_subscriptions_tab(f: &mut Frame, app: &mut App, area: Rect) {
         rows,
         [
             Constraint::Length(14),
-            Constraint::Percentage(25),
-            Constraint::Length(14),
-            Constraint::Length(20),
-            Constraint::Percentage(41),
+            Constraint::Percentage(18),
+            Constraint::Length(12),
+            Constraint::Length(16),
+            Constraint::Length(9),
+            Constraint::Length(18),
+            Constraint::Percentage(26),
         ],
     )
     .header(
-        Row::new(vec!["STATE", "PROFILE IDENTIFIER", "NODES", "SYNCHRONIZED", "REMOTE URL"])
+        Row::new(vec!["STATE", "PROFILE IDENTIFIER", "NODES", "TRAFFIC", "EXPIRY", "SYNCHRONIZED", "REMOTE URL"])
             .style(Style::default().fg(Theme::MUTED).add_modifier(Modifier::BOLD)),
     )
     .block(block);
@@ -630,6 +672,75 @@ fn render_subscriptions_tab(f: &mut Frame, app: &mut App, area: Rect) {
             .style(Style::default().fg(Theme::SURFACE2));
         let mut scrollbar_state = ScrollbarState::new(app.sub_mgr.subscriptions.len()).position(app.selected_sub_idx);
         f.render_stateful_widget(scrollbar, area.inner(Margin { vertical: 1, horizontal: 0 }), &mut scrollbar_state);
+    }
+}
+
+/// 流量列的紧凑字节格式（1.2G / 950M / 12K）
+fn compact_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b >= 10.0 * GB {
+        format!("{:.0}G", b / GB)
+    } else if b >= GB {
+        format!("{:.1}G", b / GB)
+    } else if b >= 10.0 * MB {
+        format!("{:.0}M", b / MB)
+    } else if b >= MB {
+        format!("{:.1}M", b / MB)
+    } else if b >= KB {
+        format!("{:.0}K", b / KB)
+    } else {
+        format!("{bytes}B")
+    }
+}
+
+/// 订阅流量单元格：已用/总量，达到 75% / 90% 分别变黄 / 变红
+fn traffic_cell(sub: &SubscriptionItem) -> (String, Style) {
+    let used = sub.upload.saturating_add(sub.download);
+    if sub.total > 0 {
+        let pct = ((used as f64 / sub.total as f64) * 100.0).round() as u32;
+        let style = if pct >= 90 {
+            Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)
+        } else if pct >= 75 {
+            Style::default().fg(Theme::YELLOW)
+        } else {
+            Style::default().fg(Theme::SUBTEXT0)
+        };
+        (
+            format!("{}/{}", compact_bytes(used), compact_bytes(sub.total)),
+            style,
+        )
+    } else if sub.upload > 0 || sub.download > 0 {
+        (
+            format!("↑{}/↓{}", compact_bytes(sub.upload), compact_bytes(sub.download)),
+            Style::default().fg(Theme::SUBTEXT0),
+        )
+    } else {
+        ("—".to_string(), Style::default().fg(Theme::SURFACE2))
+    }
+}
+
+/// 订阅到期单元格：剩余天数，7 天内变黄、已过期变红
+fn expiry_cell(sub: &SubscriptionItem, now_ts: i64) -> (String, Style) {
+    if sub.expire <= 0 {
+        return ("—".to_string(), Style::default().fg(Theme::SURFACE2));
+    }
+    let days = (sub.expire - now_ts).div_euclid(86_400);
+    if days < 0 {
+        (
+            "EXPIRED".to_string(),
+            Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD),
+        )
+    } else if days == 0 {
+        ("TODAY".to_string(), Style::default().fg(Theme::RED))
+    } else if days <= 7 {
+        (format!("{days}d"), Style::default().fg(Theme::YELLOW))
+    } else if days <= 30 {
+        (format!("{days}d"), Style::default().fg(Theme::SUBTEXT0))
+    } else {
+        (format!("{days}d"), Style::default().fg(Theme::MUTED))
     }
 }
 
@@ -671,12 +782,17 @@ fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
             "DOMAIN" => (Theme::MAUVE, "exact hostname"),
             "DOMAIN-SUFFIX" => (Theme::GREEN, "wildcard suffix"),
             "DOMAIN-KEYWORD" => (Theme::PEACH, "keyword match"),
+            "IP-CIDR" => (Theme::TEAL, "ip / cidr range"),
+            "GEOSITE" => (Theme::RED, "geosite code"),
+            "RULE-SET" => (Theme::YELLOW, "ruleset name"),
+            "PROCESS" => (Theme::BLUE, "process name"),
             _ => (Theme::TEXT, "generic"),
         };
 
-        let (target_text, target_color) = match rule.target {
-            RuleTarget::Direct => ("➜ DIRECT", Theme::YELLOW),
-            RuleTarget::Proxy => ("➜ PROXY", Theme::TEAL),
+        let (target_text, target_color) = match (&rule.target, &rule.group) {
+            (RuleTarget::Direct, _) => ("➜ DIRECT".to_string(), Theme::YELLOW),
+            (RuleTarget::Proxy, Some(group)) => (format!("➜ {}", group), Theme::TEAL),
+            (RuleTarget::Proxy, None) => ("➜ PROXY".to_string(), Theme::TEAL),
         };
 
         let cells = vec![
@@ -734,7 +850,7 @@ fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
 fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Length(10), Constraint::Min(4)])
+        .constraints([Constraint::Length(9), Constraint::Length(11), Constraint::Min(4)])
         .split(area);
 
     // Card 1: Mihomo Core Daemon Telemetry
@@ -922,6 +1038,16 @@ fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
         })
         .count();
 
+    let overrides_settings = &app.overrides_mgr.settings;
+    let (overrides_mode, overrides_mode_style) = if overrides_settings.has_overrides() {
+        (
+            "[■ CUSTOM ]",
+            Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        ("[○ INHERIT]", Style::default().fg(Theme::MUTED))
+    };
+
     let net_lines = vec![
         Line::from(vec![
             Span::styled("◈ Platform Driver:   ", Style::default().fg(Theme::SUBTEXT0)),
@@ -951,6 +1077,15 @@ fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
                 ),
                 Style::default().fg(Theme::SUBTEXT0),
             ),
+        ]),
+        Line::from(vec![
+            Span::styled("◈ Runtime Overrides: ", Style::default().fg(Theme::SUBTEXT0)),
+            Span::styled(overrides_mode, overrides_mode_style),
+            Span::styled(
+                format!(" {}", overrides_settings.summary()),
+                Style::default().fg(Theme::TEXT),
+            ),
+            Span::styled("  [C] Edit Config", Style::default().fg(Theme::YELLOW)),
         ]),
         Line::from(vec![
             Span::styled("◈ System Proxy:      ", Style::default().fg(Theme::SUBTEXT0)),
@@ -1004,11 +1139,17 @@ fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
 // ----------------------------------------------------------------------------
 fn render_add_sub_modal(f: &mut Frame, modal: &crate::app::AddSubModal) {
     let area = centered_rect(64, 40, f.area());
+    let editing = modal.editing_id.is_some();
+    let title = if editing {
+        " 󰑓 EDIT SUBSCRIPTION PROFILE "
+    } else {
+        " 󰑓 ADD SUBSCRIPTION PROFILE "
+    };
     f.render_widget(Clear, area);
 
     let block = Block::default()
         .title(Span::styled(
-            " 󰑓 ADD SUBSCRIPTION PROFILE ",
+            title,
             Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
@@ -1056,24 +1197,25 @@ fn render_add_sub_modal(f: &mut Frame, modal: &crate::app::AddSubModal) {
     f.render_widget(url_text, chunks[1]);
 
     // Action Hints
+    let action = if editing { "Save" } else { "Save & Synchronize" };
     let hint_line = Line::from(vec![
         Span::styled("[Tab] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
         Span::raw("Next Field   "),
         Span::styled("[Enter] ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-        Span::raw("Save & Synchronize   "),
+        Span::raw(format!("{action}   ")),
         Span::styled("[Esc] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
         Span::raw("Dismiss"),
     ]);
     f.render_widget(Paragraph::new(hint_line).alignment(Alignment::Center), chunks[2]);
 }
 
-fn render_add_rule_modal(f: &mut Frame, modal: &crate::app::AddRuleModal, proxy_group: &str) {
-    let area = centered_rect(62, 34, f.area());
+fn render_add_rule_modal(f: &mut Frame, modal: &crate::app::AddRuleModal, mgr: &crate::rules::RuleManager) {
+    let area = centered_rect(62, 38, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
         .title(Span::styled(
-            " 󰃢 ADD DOMAIN ROUTE RULE ",
+            " 󰃢 ADD ROUTE RULE ",
             Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
@@ -1089,32 +1231,45 @@ fn render_add_rule_modal(f: &mut Frame, modal: &crate::app::AddRuleModal, proxy_
             Constraint::Length(1), // Hint
             Constraint::Length(1), // Target selector
             Constraint::Length(3), // Input box
-            Constraint::Length(3), // Help
+            Constraint::Length(4), // Help
         ])
         .split(inner);
 
-    let hint = Paragraph::new("Target domain or keyword (injected at the top of rules):")
+    let hint = Paragraph::new("Target domain / keyword / CIDR (injected at the top of rules):")
         .style(Style::default().fg(Theme::SUBTEXT0));
     f.render_widget(hint, chunks[0]);
 
-    // 去向选择器：Tab / ← / → 切换，输入里的 direct: / proxy: 前缀优先
-    let target_color = match modal.target {
-        RuleTarget::Direct => Theme::YELLOW,
-        RuleTarget::Proxy => Theme::TEAL,
-    };
-    let target_desc = match modal.target {
-        RuleTarget::Direct => "直连，不经过代理".to_string(),
-        RuleTarget::Proxy => format!("走代理组 [{}]", proxy_group),
+    // 去向选择器：Tab / ← / → 循环 DIRECT → 默认代理组 → 各可选策略组
+    let (target_label, target_color, target_desc) = match (&modal.target, &modal.group) {
+        (RuleTarget::Direct, _) => (
+            "DIRECT".to_string(),
+            Theme::YELLOW,
+            "直连，不经过代理".to_string(),
+        ),
+        (RuleTarget::Proxy, Some(group)) => (
+            format!("PROXY: {}", group),
+            Theme::TEAL,
+            format!("走指定代理组 [{}]", group),
+        ),
+        (RuleTarget::Proxy, None) => (
+            "PROXY (auto)".to_string(),
+            Theme::TEAL,
+            format!("走默认代理组 [{}]", mgr.target_hint),
+        ),
     };
     let target_line = Line::from(vec![
         Span::styled(" TARGET ", Style::default().fg(Theme::SUBTEXT0)),
         Span::styled("◀ ", Style::default().fg(Theme::MUTED)),
         Span::styled(
-            format!(" {} ", modal.target.as_str()),
+            format!(" {} ", target_label),
             Style::default().fg(target_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" ▶  ", Style::default().fg(Theme::MUTED)),
         Span::styled(target_desc, Style::default().fg(Theme::SUBTEXT0)),
+        Span::styled(
+            format!("  [{} groups]", mgr.groups.len()),
+            Style::default().fg(Theme::MUTED),
+        ),
     ]);
     f.render_widget(Paragraph::new(target_line), chunks[1]);
 
@@ -1139,14 +1294,23 @@ fn render_add_rule_modal(f: &mut Frame, modal: &crate::app::AddRuleModal, proxy_
             Span::raw(" → 关键字"),
         ]),
         Line::from(vec![
-            Span::styled("direct:example.com", Style::default().fg(Theme::YELLOW)),
-            Span::raw(" 可覆盖 TARGET 选择（直连）│ "),
+            Span::styled("ip-cidr:10.0.0.0/8", Style::default().fg(Theme::TEAL)),
+            Span::raw(" │ "),
+            Span::styled("geosite:cn", Style::default().fg(Theme::RED)),
+            Span::raw(" │ "),
+            Span::styled("rule-set:proxy", Style::default().fg(Theme::YELLOW)),
+            Span::raw(" │ "),
+            Span::styled("process:chrome", Style::default().fg(Theme::BLUE)),
+        ]),
+        Line::from(vec![
+            Span::styled("direct:xxx", Style::default().fg(Theme::YELLOW)),
+            Span::raw(" 强制直连 │ "),
             Span::styled("proxy:xxx", Style::default().fg(Theme::TEAL)),
-            Span::raw(" 强制走代理"),
+            Span::raw(" 强制走默认代理组（前缀优先于 TARGET）"),
         ]),
         Line::from(vec![
             Span::styled("[Tab]", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::raw(" 切换目标  "),
+            Span::raw(" 循环目标  "),
             Span::styled("[Enter]", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
             Span::raw(" 保存并热重载  "),
             Span::styled("[Esc]", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
@@ -1154,6 +1318,101 @@ fn render_add_rule_modal(f: &mut Frame, modal: &crate::app::AddRuleModal, proxy_
         ]),
     ];
     f.render_widget(Paragraph::new(help_text).alignment(Alignment::Center), chunks[3]);
+}
+
+// ----------------------------------------------------------------------------
+// Rule Match Probe modal
+// ----------------------------------------------------------------------------
+fn render_rule_test_modal(f: &mut Frame, modal: &crate::app::RuleTestModal) {
+    let area = centered_rect(66, 30, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " 󰒍 RULE MATCH PROBE ",
+            Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Theme::active_border());
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Hint
+            Constraint::Length(3), // Input box
+            Constraint::Length(1), // Spacer
+            Constraint::Min(2),    // Result
+            Constraint::Length(1), // Help
+        ])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new("Probe a domain against data/config.yaml (top-down priority):")
+            .style(Style::default().fg(Theme::SUBTEXT0)),
+        chunks[0],
+    );
+
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Theme::CYAN));
+    let input_text = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            modal.input.as_str(),
+            Style::default().fg(Theme::TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("█", Style::default().fg(Theme::CYAN)),
+    ]);
+    f.render_widget(Paragraph::new(input_text).block(input_block), chunks[1]);
+
+    let (result_line, result_style) = match &modal.report {
+        None => (
+            "按 Enter 推演：本地只理解域名类规则与 MATCH".to_string(),
+            Style::default().fg(Theme::MUTED),
+        ),
+        Some(report) => match &report.outcome {
+            ProbeOutcome::Match { index, rule } => (
+                format!("✔ 命中第 {} 条规则：{}", index + 1, rule),
+                Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD),
+            ),
+            ProbeOutcome::KernelOnly { index, rule } => (
+                format!("⚠ 第 {} 条规则需要内核解析，无法本地确定：{}", index + 1, rule),
+                Style::default().fg(Theme::YELLOW),
+            ),
+            ProbeOutcome::NoMatch => (
+                format!(
+                    "○ 未命中任何规则（已扫描 {} 条），将使用 mihomo 的默认策略",
+                    report.scanned
+                ),
+                Style::default().fg(Theme::SUBTEXT0),
+            ),
+        },
+    };
+
+    let result = Paragraph::new(Text::from(vec![
+        Line::from(Span::styled(result_line, result_style)),
+        Line::from(Span::styled(
+            "提示：IP-CIDR / RULE-SET / GEOSITE / PROCESS 由内核按真实网络/进程状态匹配，本地无法推演。",
+            Style::default().fg(Theme::MUTED),
+        )),
+    ]))
+    .wrap(Wrap { trim: true });
+    f.render_widget(result, chunks[3]);
+
+    let help = Line::from(vec![
+        Span::styled("[Enter]", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+        Span::raw(" 推演  "),
+        Span::styled("[Esc]", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
+        Span::raw(" 关闭  "),
+        Span::styled("输入直接覆盖", Style::default().fg(Theme::MUTED)),
+    ])
+    .alignment(Alignment::Center);
+    f.render_widget(Paragraph::new(help), chunks[4]);
 }
 
 fn render_dns_modal(f: &mut Frame, modal: &crate::app::DnsModal) {
@@ -1315,6 +1574,351 @@ fn render_dns_input(f: &mut Frame, area: Rect, title: &str, value: &str, active:
     f.render_widget(Paragraph::new(text).block(block), area);
 }
 
+fn render_health_modal(f: &mut Frame, modal: &crate::app::HealthModal) {
+    let screen = f.area();
+    let width = 78.min(screen.width.saturating_sub(4)).max(40);
+    let height = (modal.items.len() as u16 + 8)
+        .min(screen.height.saturating_sub(2))
+        .max(10);
+    let area = Rect {
+        x: screen.x + screen.width.saturating_sub(width) / 2,
+        y: screen.y + screen.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, area);
+
+    let title = if modal.generated.is_empty() {
+        " ◈ KERNEL HEALTH CHECK · 检查中 ".to_string()
+    } else {
+        format!(" ◈ KERNEL HEALTH CHECK · {} ", modal.generated)
+    };
+    let block = Block::default()
+        .title(title)
+        .title_style(Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Theme::active_border())
+        .style(Style::default().bg(Theme::MANTLE));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(inner);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if modal.loading {
+        lines.push(Line::from(Span::styled(
+            "  正在收集检查项（进程 / REST / 版本 / 端口）...",
+            Style::default().fg(Theme::SAPPHIRE),
+        )));
+    }
+    for item in &modal.items {
+        let (icon, icon_style) = match item.ok {
+            Some(true) => ("  ✔ ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+            Some(false) => ("  ✘ ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
+            None => ("  · ", Style::default().fg(Theme::MUTED)),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(icon, icon_style),
+            Span::styled(
+                format!(" {:<14}", item.label),
+                Style::default().fg(Theme::TEXT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(item.detail.clone(), Style::default().fg(Theme::SUBTEXT0)),
+        ]));
+    }
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: true }),
+        chunks[0],
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "  Esc 关闭 · H / r 重新检查",
+            Style::default().fg(Theme::MUTED),
+        ))),
+        chunks[1],
+    );
+}
+
+fn render_logs_modal(f: &mut Frame, modal: &crate::app::LogModal) {
+    let screen = f.area();
+    let width = 110.min(screen.width.saturating_sub(4)).max(40);
+    let height = screen.height.saturating_sub(4).max(12);
+    let area = Rect {
+        x: screen.x + screen.width.saturating_sub(width) / 2,
+        y: screen.y + screen.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, area);
+
+    let title = if modal.generated.is_empty() {
+        format!(" ◈ KERNEL LOG TAIL · {} ", crate::diagnostics::LOG_PATH)
+    } else {
+        format!(
+            " ◈ KERNEL LOG TAIL · {} · {} ",
+            crate::diagnostics::LOG_PATH,
+            modal.generated
+        )
+    };
+    let block = Block::default()
+        .title(title)
+        .title_style(Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Theme::active_border())
+        .style(Style::default().bg(Theme::MANTLE));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let total = modal.lines.len();
+    let filter_line = Line::from(vec![
+        Span::styled(
+            "  FILTER  ",
+            Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            modal.filter.clone(),
+            Style::default().fg(Theme::TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("█", Style::default().fg(Theme::CYAN)),
+        Span::styled(
+            format!("   (共 {} 行，Enter 重新读取)", total),
+            Style::default().fg(Theme::MUTED),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(filter_line), chunks[0]);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if modal.loading {
+        lines.push(Line::from(Span::styled(
+            "  正在读取日志尾部...",
+            Style::default().fg(Theme::SAPPHIRE),
+        )));
+    } else if let Some(err) = &modal.error {
+        lines.push(Line::from(Span::styled(
+            format!("  ✘ {}", err),
+            Style::default().fg(Theme::RED),
+        )));
+    } else {
+        let matched = crate::diagnostics::filter_lines(&modal.lines, &modal.filter, 300);
+        if matched.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  (无匹配日志)",
+                Style::default().fg(Theme::MUTED),
+            )));
+        }
+        for line in matched {
+            let style = match crate::diagnostics::classify_log_line(&line) {
+                crate::diagnostics::LogLevel::Error => {
+                    Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)
+                }
+                crate::diagnostics::LogLevel::Warn => Style::default().fg(Theme::YELLOW),
+                crate::diagnostics::LogLevel::Info => Style::default().fg(Theme::SUBTEXT0),
+                crate::diagnostics::LogLevel::Other => Style::default().fg(Theme::MUTED),
+            };
+            lines.push(Line::from(Span::styled(line, style)));
+        }
+    }
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        chunks[1],
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "  输入关键字过滤 · Backspace 删除 · Enter 重新读取 · Esc 关闭",
+            Style::default().fg(Theme::MUTED),
+        ))),
+        chunks[2],
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Runtime overrides modal (Settings → C)
+// ----------------------------------------------------------------------------
+fn overrides_option_label(value: Option<&str>) -> String {
+    match value {
+        None => "INHERIT".to_string(),
+        Some(v) => v.to_ascii_uppercase(),
+    }
+}
+
+fn overrides_bool_label(value: Option<bool>) -> String {
+    match value {
+        None => "INHERIT".to_string(),
+        Some(true) => "ON".to_string(),
+        Some(false) => "OFF".to_string(),
+    }
+}
+
+fn render_overrides_field(
+    f: &mut Frame,
+    area: Rect,
+    label: &str,
+    value: &str,
+    hint: &str,
+    active: bool,
+) {
+    let border = if active {
+        Style::default().fg(Theme::CYAN)
+    } else {
+        Theme::inactive_border()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border);
+    let value_style = if active {
+        Style::default()
+            .fg(Theme::CYAN)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Theme::TEXT)
+    };
+    let line = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(format!("{label:<14}"), Style::default().fg(Theme::SUBTEXT0)),
+        Span::styled(
+            if active {
+                format!("▶ {value} ◀")
+            } else {
+                format!("  {value}  ")
+            },
+            value_style,
+        ),
+        Span::styled(format!("  {hint}"), Style::default().fg(Theme::MUTED)),
+    ]);
+    f.render_widget(Paragraph::new(line).block(block), area);
+}
+
+fn render_overrides_modal(f: &mut Frame, modal: &crate::app::OverridesModal) {
+    let screen = f.area();
+    let width = 72.min(screen.width.saturating_sub(4)).max(40);
+    let height = 21.min(screen.height.saturating_sub(4)).max(12);
+    let area = Rect {
+        x: screen.x + screen.width.saturating_sub(width) / 2,
+        y: screen.y + screen.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " ⚙ RUNTIME OVERRIDES · data/config.yaml ",
+            Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Theme::active_border())
+        .style(Style::default().bg(Theme::MANTLE));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // hint
+            Constraint::Length(3), // mode
+            Constraint::Length(3), // log-level
+            Constraint::Length(3), // allow-lan
+            Constraint::Length(3), // ipv6
+            Constraint::Length(3), // unified-delay
+            Constraint::Length(2), // help
+        ])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(
+            " Space / ← → 循环取值；INHERIT 表示沿用订阅配置（不写覆盖项）",
+        )
+        .style(Style::default().fg(Theme::SUBTEXT0)),
+        chunks[0],
+    );
+
+    let rows = [
+        (
+            "mode",
+            overrides_option_label(modal.mode.as_deref()),
+            "rule / global / direct",
+        ),
+        (
+            "log-level",
+            overrides_option_label(modal.log_level.as_deref()),
+            "silent / error / warning / info / debug",
+        ),
+        (
+            "allow-lan",
+            overrides_bool_label(modal.allow_lan),
+            "允许局域网设备使用代理",
+        ),
+        (
+            "ipv6",
+            overrides_bool_label(modal.ipv6),
+            "内核 IPv6 支持",
+        ),
+        (
+            "unified-delay",
+            overrides_bool_label(modal.unified_delay),
+            "统一计算直连 / 代理延迟",
+        ),
+    ];
+    for (idx, (label, value, hint)) in rows.iter().enumerate() {
+        render_overrides_field(
+            f,
+            chunks[idx + 1],
+            label,
+            value,
+            hint,
+            idx == modal.active_field,
+        );
+    }
+
+    let help = vec![
+        Line::from(vec![
+            Span::styled(
+                "[Space] ",
+                Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("切换取值  "),
+            Span::styled(
+                "[Tab/↓] ",
+                Style::default()
+                    .fg(Theme::LAVENDER)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("下一项  "),
+            Span::styled(
+                "[Enter] ",
+                Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("保存并热重载  "),
+            Span::styled(
+                "[Esc] ",
+                Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("取消"),
+        ]),
+        Line::from(Span::styled(
+            " 保存后写入 data/overrides.json，并在 apply_rules_to_config() 中覆盖订阅同名键",
+            Style::default().fg(Theme::MUTED),
+        )),
+    ];
+    f.render_widget(Paragraph::new(help), chunks[6]);
+}
+
 fn render_edit_port_modal(f: &mut Frame, port_input: &str) {
     let area = centered_rect(52, 28, f.area());
     f.render_widget(Clear, area);
@@ -1449,26 +2053,33 @@ fn help_right_column(width: u16) -> Vec<Line<'static>> {
     vec![
         help_section("SUBSCRIPTIONS", width),
         help_row("a", "新增订阅"),
+        help_row("e", "编辑名称 / URL"),
         help_row("u / U", "更新所选 / 全部订阅"),
+        help_row("i", "切换自动更新间隔"),
         help_row("Enter", "激活并重载内核"),
         help_row("x", "删除所选订阅"),
         Line::default(),
         help_section("SETTINGS", width),
         help_row("d", "DNS 覆盖编辑器"),
+        help_row("C", "运行配置覆盖（mode / 日志级别 / LAN）"),
+        help_row("H", "内核体检（进程/版本/端口）"),
+        help_row("L", "内核日志查看 / 过滤"),
         help_row("K", "下载 / 更新 Mihomo 内核"),
         help_row("U", "检查并安装自身更新"),
         help_row("s / S", "停止 / 重启内核"),
         help_row("A", "以管理员运行内核"),
         Line::default(),
         help_section("RULES", width),
-        help_row("a", "新增域名规则"),
-        help_row("t", "切换 DIRECT / PROXY"),
+        help_row("a", "新增域名/IP/GEOSITE 规则"),
+        help_row("t", "循环 DIRECT / 代理组"),
+        help_row("K / J", "上移 / 下移规则优先级"),
+        help_row("f", "域名命中推演"),
         help_row("x", "删除所选规则"),
         Line::default(),
         help_section("DIALOGS", width),
         help_row("Esc", "关闭弹窗"),
         help_row("Tab / Shift+Tab", "切换字段"),
-        help_row("Space", "切换开关（DNS 弹窗）"),
+        help_row("Space", "切换开关 / 循环取值"),
         help_row("Enter", "保存并热重载"),
     ]
 }
@@ -1476,7 +2087,7 @@ fn help_right_column(width: u16) -> Vec<Line<'static>> {
 fn render_help_modal(f: &mut Frame, area: Rect) {
     // 固定尺寸的紧凑对话框：内容约 24 行，不再撑满整屏留出大片空白。
     let width = 96.min(area.width.saturating_sub(2)).max(40);
-    let height = 30.min(area.height.saturating_sub(2)).max(11);
+    let height = 32.min(area.height.saturating_sub(2)).max(11);
     let popup = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -1528,7 +2139,7 @@ fn render_help_modal(f: &mut Frame, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "   · 按作用域分组 · 共 35 项",
+                "   · 按作用域分组 · 共 43 项",
                 Style::default().fg(Theme::MUTED),
             ),
         ])),
@@ -1685,10 +2296,14 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(" ◈ SUBS: ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
                 Span::styled("[a] ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
                 Span::raw("Add  "),
+                Span::styled("[e] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
+                Span::raw("Edit  "),
                 Span::styled("[u] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
                 Span::raw("Update  "),
                 Span::styled("[U] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
                 Span::raw("Update All  "),
+                Span::styled("[i] ", Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD)),
+                Span::raw("Auto  "),
                 Span::styled("[Enter] ", Style::default().fg(Theme::LAVENDER).add_modifier(Modifier::BOLD)),
                 Span::raw("Activate  "),
                 Span::styled("[x] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
@@ -1704,6 +2319,12 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw("TUN  "),
                 Span::styled("[d] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
                 Span::raw("DNS  "),
+                Span::styled("[C] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+                Span::raw("Config  "),
+                Span::styled("[H] ", Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD)),
+                Span::raw("Health  "),
+                Span::styled("[L] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
+                Span::raw("Logs  "),
                 Span::styled("[K] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),
                 Span::raw("Kernel  "),
                 Span::styled("[U] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
@@ -1718,9 +2339,13 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
             ActiveTab::Rules => Line::from(vec![
                 Span::styled(" ◈ RULES: ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
                 Span::styled("[a] ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-                Span::raw("Add Domain  "),
+                Span::raw("Add  "),
                 Span::styled("[t] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-                Span::raw("Toggle DIRECT/PROXY  "),
+                Span::raw("Cycle Target  "),
+                Span::styled("[K/J] ", Style::default().fg(Theme::BLUE).add_modifier(Modifier::BOLD)),
+                Span::raw("Move  "),
+                Span::styled("[f] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+                Span::raw("Probe  "),
                 Span::styled("[x] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
                 Span::raw("Delete  "),
                 Span::styled("[PgUp/Dn] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
@@ -1880,6 +2505,31 @@ mod tests {
         assert!(dump.replace(' ', "").contains("?/Esc关闭"));
         // 双栏分隔线存在
         assert!(dump.contains("│"));
+    }
+
+    #[test]
+    fn overrides_modal_shows_fields_and_values() {
+        let backend = TestBackend::new(120, 44);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let modal = crate::app::OverridesModal {
+                    mode: Some("rule".to_string()),
+                    log_level: None,
+                    allow_lan: Some(true),
+                    ipv6: None,
+                    unified_delay: None,
+                    active_field: 0,
+                };
+                render_overrides_modal(f, &modal);
+            })
+            .unwrap();
+
+        let dump = dump_buffer(&terminal);
+        assert!(dump.contains("RUNTIME OVERRIDES"));
+        assert!(dump.contains("allow-lan"));
+        assert!(dump.contains("INHERIT"));
+        assert!(dump.contains("RULE"));
     }
 
     #[test]

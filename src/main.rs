@@ -2,10 +2,12 @@ mod api;
 mod app;
 mod appupdate;
 mod core;
+mod diagnostics;
 mod dnsconf;
 mod envproxy;
 mod installer;
 mod kernelupdate;
+mod overrides;
 mod rules;
 mod subscriptions;
 mod sysproxy;
@@ -23,7 +25,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::{self, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 #[derive(Debug)]
@@ -49,6 +51,10 @@ pub enum AppEvent {
     AppUpdateChecked(Result<String, String>),
     AppUpdateProgress(u8),
     AppUpdateDone(Result<appupdate::AppUpdateReport, String>),
+    /// 内核体检结果（Settings → H）
+    HealthChecked(Vec<diagnostics::HealthItem>),
+    /// 内核日志尾部读取结果（Settings → L）
+    LogsLoaded(Result<Vec<String>, String>),
 }
 
 fn print_help() {
@@ -421,6 +427,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                AppEvent::HealthChecked(items) => {
+                    let bad = items.iter().filter(|i| i.ok == Some(false)).count();
+                    app.set_health_items(items);
+                    if bad == 0 {
+                        app.set_status("✔ 内核体检完成：未发现异常");
+                    } else {
+                        app.set_status(format!("✘ 内核体检完成：{} 项需要关注", bad));
+                    }
+                }
+                AppEvent::LogsLoaded(result) => {
+                    match &result {
+                        Ok(lines) => app.set_status(format!(
+                            "✔ 已载入内核日志 {} 行 ({} 之后的尾部)",
+                            lines.len(),
+                            diagnostics::LOG_PATH
+                        )),
+                        Err(e) => app.set_status(format!("✘ {e}")),
+                    }
+                    app.set_log_lines(result);
+                }
                 AppEvent::TunToggled(res) => {
                     match res {
                         Ok(active) => {
@@ -453,7 +479,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                AppEvent::Tick => {}
+                AppEvent::Tick => {
+                    // 订阅页的自动更新：每 60 秒检查一次，仅刷新已到期的订阅
+                    if app.sub_mgr.auto_update_minutes > 0
+                        && app.last_sub_auto_check.elapsed() >= Duration::from_secs(60)
+                    {
+                        app.last_sub_auto_check = Instant::now();
+                        let due: Vec<_> = app
+                            .sub_mgr
+                            .due_subscriptions()
+                            .into_iter()
+                            .filter(|sub| !app.updating_subs.contains(&sub.id))
+                            .collect();
+                        if !due.is_empty() {
+                            app.set_status(format!(
+                                "自动更新 {} 个到期订阅 (间隔 {})...",
+                                due.len(),
+                                subscriptions::auto_update_label(app.sub_mgr.auto_update_minutes)
+                            ));
+                            for sub in due {
+                                spawn_sub_download(&mut app, &tx, sub);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -481,6 +530,88 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::process::exit(0);
 }
 
+/// 后台拉取订阅并回报 `SubUpdated`，供手动/自动更新共用
+fn spawn_sub_download(
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<AppEvent>,
+    sub: subscriptions::SubscriptionItem,
+) {
+    let sub_id = sub.id.clone();
+    let sub_name = sub.name.clone();
+    let sub_url = sub.url.clone();
+    let is_active = sub.active;
+    let mixed_port = app.mixed_port;
+    let profiles_dir = app.sub_mgr.profiles_dir.clone();
+    app.updating_subs.insert(sub_id.clone());
+
+    let tx_sub = tx.clone();
+    tokio::spawn(async move {
+        let result = subscriptions::SubscriptionManager::download_and_update(
+            sub_id.clone(),
+            sub_name,
+            sub_url,
+            is_active,
+            mixed_port,
+            profiles_dir,
+        )
+        .await;
+        let _ = tx_sub.send(AppEvent::SubUpdated { sub_id, result });
+    });
+}
+
+/// 上移/下移选中的自定义规则，随后重注入并热重载
+fn move_selected_rule(app: &mut App, up: bool) {
+    let idx = app.selected_rule_idx;
+    let Some(new_idx) = (if up {
+        app.rule_mgr.move_up(idx)
+    } else {
+        app.rule_mgr.move_down(idx)
+    }) else {
+        let edge = if up { "已是最高优先级" } else { "已是最低优先级" };
+        app.set_status(format!("✘ {edge}"));
+        return;
+    };
+    app.selected_rule_idx = new_idx;
+    let (count, target) = rules::apply_rules_to_config();
+    app.rule_mgr.target_hint = target;
+    app.set_status(format!(
+        "✔ 规则已{}至第 {} 位 (共 {} 条，热重载中...)",
+        if up { "上移" } else { "下移" },
+        new_idx + 1,
+        count
+    ));
+    let client = app.client.clone();
+    let full_path = get_clean_config_path();
+    tokio::spawn(async move {
+        let _ = client.reload_config(&full_path).await;
+    });
+}
+
+/// 打开体检弹窗并异步收集检查项
+fn spawn_health_check(app: &mut App, tx: &mpsc::UnboundedSender<AppEvent>) {
+    app.open_health_modal();
+    let api_url = app.api_url.clone();
+    let secret = app.core_secret.clone();
+    let mixed_port = app.mixed_port;
+    let tx_health = tx.clone();
+    tokio::spawn(async move {
+        let core = CoreManager::new();
+        let items = diagnostics::collect_health(&core, &api_url, secret, mixed_port).await;
+        let _ = tx_health.send(AppEvent::HealthChecked(items));
+    });
+}
+
+/// 重新读取内核日志尾部（不重置弹窗里的过滤关键字）
+fn spawn_logs_reload(tx: &mpsc::UnboundedSender<AppEvent>) {
+    let tx_logs = tx.clone();
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(|| diagnostics::read_log_tail(400))
+            .await
+            .unwrap_or_else(|e| Err(format!("读取日志失败：{}", e)));
+        let _ = tx_logs.send(AppEvent::LogsLoaded(result));
+    });
+}
+
 async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSender<AppEvent>) {
     if key.kind != KeyEventKind::Press {
         return;
@@ -492,6 +623,62 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
             KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
                 app.show_help = false;
             }
+            _ => {}
+        }
+        return;
+    }
+
+    // 运行配置覆盖弹窗（Settings → C）
+    if app.show_overrides_modal.is_some() {
+        match key.code {
+            KeyCode::Esc => app.close_overrides_modal(),
+            KeyCode::Tab | KeyCode::Down => app.overrides_modal_next_field(),
+            KeyCode::BackTab | KeyCode::Up => app.overrides_modal_prev_field(),
+            KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => {
+                app.overrides_modal_cycle_value()
+            }
+            KeyCode::Enter => match app.save_overrides_from_modal() {
+                Ok(settings) => {
+                    let (_, target) = rules::apply_rules_to_config();
+                    app.rule_mgr.target_hint = target;
+                    app.set_status(format!(
+                        "✔ 运行时配置已保存并注入: {} (热重载中...)",
+                        settings.summary()
+                    ));
+                    let client = app.client.clone();
+                    let full_path = get_clean_config_path();
+                    tokio::spawn(async move {
+                        let _ = client.reload_config(&full_path).await;
+                    });
+                }
+                Err(e) => app.set_status(format!("✘ {e}")),
+            },
+            _ => {}
+        }
+        return;
+    }
+
+    // 体检 / 日志弹窗（Settings → H / L）
+    if app.show_health_modal.is_some() {
+        match key.code {
+            KeyCode::Esc => app.close_health_modal(),
+            KeyCode::Char('H') | KeyCode::Char('r') => spawn_health_check(app, tx),
+            _ => {}
+        }
+        return;
+    }
+    if app.show_logs_modal.is_some() {
+        match key.code {
+            KeyCode::Esc => app.close_logs_modal(),
+            KeyCode::Enter => {
+                if let Some(modal) = &mut app.show_logs_modal {
+                    modal.loading = true;
+                    modal.error = None;
+                }
+                spawn_logs_reload(tx);
+            }
+            KeyCode::Backspace => app.log_modal_backspace(),
+            KeyCode::Char(c) => app.log_modal_handle_char(c),
             _ => {}
         }
         return;
@@ -558,29 +745,30 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
                     let name = modal.name_input.trim().to_string();
                     let url = modal.url_input.trim().to_string();
                     if !name.is_empty() && !url.is_empty() {
-                        let sub = app.sub_mgr.add(name.clone(), url.clone());
-                        let sub_id = sub.id.clone();
-                        let sub_name = sub.name.clone();
-                        let sub_url = sub.url.clone();
-                        let is_active = sub.active;
-                        let mixed_port = app.mixed_port;
-                        let profiles_dir = app.sub_mgr.profiles_dir.clone();
-                        app.updating_subs.insert(sub_id.clone());
-                        app.set_status(format!("✔ Added subscription '{}'. Fetching...", name));
-
-                        // Spawn download
-                        let tx_sub = tx.clone();
-                        tokio::spawn(async move {
-                            let result = subscriptions::SubscriptionManager::download_and_update(
-                                sub_id.clone(),
-                                sub_name,
-                                sub_url,
-                                is_active,
-                                mixed_port,
-                                profiles_dir,
-                            ).await;
-                            let _ = tx_sub.send(AppEvent::SubUpdated { sub_id, result });
-                        });
+                        if let Some(id) = modal.editing_id {
+                            let old_url = app
+                                .sub_mgr
+                                .subscriptions
+                                .iter()
+                                .find(|s| s.id == id)
+                                .map(|s| s.url.clone())
+                                .unwrap_or_default();
+                            if let Some(updated) = app.sub_mgr.update_meta(&id, name.clone(), url) {
+                                if updated.url != old_url {
+                                    app.set_status(format!(
+                                        "✔ 已更新订阅 '{}'，URL 变化，重新下载...",
+                                        name
+                                    ));
+                                    spawn_sub_download(app, tx, updated);
+                                } else {
+                                    app.set_status(format!("✔ 已更新订阅 '{}'", name));
+                                }
+                            }
+                        } else {
+                            let sub = app.sub_mgr.add(name.clone(), url);
+                            app.set_status(format!("✔ Added subscription '{}'. Fetching...", name));
+                            spawn_sub_download(app, tx, sub);
+                        }
                     }
                 }
             }
@@ -596,7 +784,7 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
                 app.close_modal();
             }
             KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
-                app.rule_modal_toggle_target();
+                app.rule_modal_cycle_destination();
             }
             KeyCode::Backspace => {
                 app.rule_modal_backspace();
@@ -610,16 +798,18 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
                     if text.is_empty() {
                         app.set_status("✘ 域名不能为空");
                     } else {
-                        match app.rule_mgr.add(&text, modal.target) {
+                        match app.rule_mgr.add(&text, modal.target, modal.group.as_deref()) {
                             Some(item) => {
                                 let (count, target) = rules::apply_rules_to_config();
                                 app.rule_mgr.target_hint = target;
+                                app.rule_mgr.groups = rules::config_proxy_groups();
+                                let destination = match &item.group {
+                                    Some(g) if item.target == crate::rules::RuleTarget::Proxy => g.clone(),
+                                    _ => item.target.as_str().to_string(),
+                                };
                                 app.set_status(format!(
                                     "✔ 已添加规则 {} {} → {} (共 {} 条，热重载中...)",
-                                    item.rule_type,
-                                    item.value,
-                                    item.target.as_str(),
-                                    count
+                                    item.rule_type, item.value, destination, count
                                 ));
                                 let client = app.client.clone();
                                 let full_path = get_clean_config_path();
@@ -635,6 +825,26 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
                         }
                     }
                 }
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Rule probe (命中推演) modal
+    if app.show_rule_test_modal.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                app.close_rule_test_modal();
+            }
+            KeyCode::Enter => {
+                app.rule_test_run();
+            }
+            KeyCode::Backspace => {
+                app.rule_test_backspace();
+            }
+            KeyCode::Char(c) => {
+                app.rule_test_handle_char(c);
             }
             _ => {}
         }
@@ -760,7 +970,11 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
             app.toggle_sys_proxy();
         }
         KeyCode::Char('e') => {
-            app.toggle_env_proxy();
+            if app.active_tab == ActiveTab::Subscriptions {
+                app.open_edit_sub_modal();
+            } else {
+                app.toggle_env_proxy();
+            }
         }
         KeyCode::Char('n') => {
             let target = !app.tun_enabled;
@@ -886,15 +1100,16 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
                 }
             } else if app.active_tab == ActiveTab::Rules && !app.rule_mgr.rules.is_empty() {
                 let idx = app.selected_rule_idx;
-                if let Some(item) = app.rule_mgr.toggle_target(idx) {
+                if let Some(item) = app.rule_mgr.cycle_destination(idx) {
                     let (count, target) = rules::apply_rules_to_config();
                     app.rule_mgr.target_hint = target;
+                    let destination = match &item.group {
+                        Some(g) if item.target == crate::rules::RuleTarget::Proxy => g.clone(),
+                        _ => item.target.as_str().to_string(),
+                    };
                     app.set_status(format!(
                         "✔ 规则 {} {} 已切换为 {} (共 {} 条，热重载中...)",
-                        item.rule_type,
-                        item.value,
-                        item.target.as_str(),
-                        count
+                        item.rule_type, item.value, destination, count
                     ));
                     let client = app.client.clone();
                     let full_path = get_clean_config_path();
@@ -927,58 +1142,28 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
                 app.open_add_rule_modal();
             }
         }
+        KeyCode::Char('i') => {
+            if app.active_tab == ActiveTab::Subscriptions {
+                let minutes = app.sub_mgr.cycle_auto_update();
+                app.set_status(format!(
+                    "✔ 订阅自动更新间隔已设为 [{}]",
+                    subscriptions::auto_update_label(minutes)
+                ));
+            }
+        }
         KeyCode::Char('u') => {
             if app.active_tab == ActiveTab::Subscriptions && !app.sub_mgr.subscriptions.is_empty() {
-                let idx = app.selected_sub_idx;
-                let sub = &app.sub_mgr.subscriptions[idx];
-                let sub_id = sub.id.clone();
-                let sub_name = sub.name.clone();
-                let sub_url = sub.url.clone();
-                let is_active = sub.active;
-                let mixed_port = app.mixed_port;
-                let profiles_dir = app.sub_mgr.profiles_dir.clone();
-                app.updating_subs.insert(sub_id.clone());
-                app.set_status(format!("Updating subscription '{}' in background...", sub_name));
-
-                let tx_sub = tx.clone();
-                tokio::spawn(async move {
-                    let result = subscriptions::SubscriptionManager::download_and_update(
-                        sub_id.clone(),
-                        sub_name,
-                        sub_url,
-                        is_active,
-                        mixed_port,
-                        profiles_dir,
-                    ).await;
-                    let _ = tx_sub.send(AppEvent::SubUpdated { sub_id, result });
-                });
+                let sub = app.sub_mgr.subscriptions[app.selected_sub_idx].clone();
+                app.set_status(format!("Updating subscription '{}' in background...", sub.name));
+                spawn_sub_download(app, tx, sub);
             }
         }
         KeyCode::Char('U') => {
             if app.active_tab == ActiveTab::Subscriptions && !app.sub_mgr.subscriptions.is_empty() {
-                let total = app.sub_mgr.subscriptions.len();
-                app.set_status(format!("Updating all {} subscriptions...", total));
-                for sub in &app.sub_mgr.subscriptions {
-                    let sub_id = sub.id.clone();
-                    let sub_name = sub.name.clone();
-                    let sub_url = sub.url.clone();
-                    let is_active = sub.active;
-                    let mixed_port = app.mixed_port;
-                    let profiles_dir = app.sub_mgr.profiles_dir.clone();
-                    app.updating_subs.insert(sub_id.clone());
-
-                    let tx_sub = tx.clone();
-                    tokio::spawn(async move {
-                        let result = subscriptions::SubscriptionManager::download_and_update(
-                            sub_id.clone(),
-                            sub_name,
-                            sub_url,
-                            is_active,
-                            mixed_port,
-                            profiles_dir,
-                        ).await;
-                        let _ = tx_sub.send(AppEvent::SubUpdated { sub_id, result });
-                    });
+                let subs = app.sub_mgr.subscriptions.clone();
+                app.set_status(format!("Updating all {} subscriptions...", subs.len()));
+                for sub in subs {
+                    spawn_sub_download(app, tx, sub);
                 }
             } else if app.active_tab == ActiveTab::Settings {
                 if app.app_busy {
@@ -1050,6 +1235,22 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
                     let _ = client.close_all_connections().await;
                 });
                 app.set_status("Closed all active connections");
+            }
+        }
+        KeyCode::Char('H') => {
+            if app.active_tab == ActiveTab::Settings {
+                spawn_health_check(app, tx);
+            }
+        }
+        KeyCode::Char('C') => {
+            if app.active_tab == ActiveTab::Settings {
+                app.open_overrides_modal();
+            }
+        }
+        KeyCode::Char('L') => {
+            if app.active_tab == ActiveTab::Settings {
+                app.open_logs_modal();
+                spawn_logs_reload(tx);
             }
         }
         KeyCode::Char('s') => {
@@ -1124,6 +1325,18 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
                         let _ = tx_k.send(AppEvent::KernelUpdateDone(result));
                     });
                 }
+            } else if app.active_tab == ActiveTab::Rules {
+                move_selected_rule(app, true);
+            }
+        }
+        KeyCode::Char('J') => {
+            if app.active_tab == ActiveTab::Rules {
+                move_selected_rule(app, false);
+            }
+        }
+        KeyCode::Char('f') => {
+            if app.active_tab == ActiveTab::Rules {
+                app.open_rule_test_modal();
             }
         }
         KeyCode::Char('r') => {

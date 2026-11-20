@@ -284,6 +284,7 @@ mod tests {
             rule_type: rule_type.to_string(),
             value: value.to_string(),
             target,
+            group: None,
         }
     }
 

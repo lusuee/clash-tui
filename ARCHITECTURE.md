@@ -40,7 +40,7 @@
 clash-tui/
 ├── src/                  # 全部 Rust 源码（单二进制）
 ├── bin/                  # mihomo 内核二进制（gitignored，运行时放置）
-├── data/                 # 内核运行目录（gitignored）：config.yaml、dns.json、mihomo.log、
+├── data/                 # 内核运行目录（gitignored）：config.yaml、dns.json、overrides.json、mihomo.log、
 │                         # cache.db、geoip/geosite 数据、Rules/RuleSet
 ├── profiles/             # 订阅原始下载存档 {sub_id}.yaml（gitignored）
 ├── subscriptions.json    # 订阅元数据（gitignored，含私密 URL）
@@ -65,10 +65,12 @@ clash-tui/
 | `src/core.rs` | Mihomo 内核守护进程生命周期管理 | `CoreManager::{start_core, stop_core, start_core_as_admin, is_running, ensure_default_config}` |
 | `src/kernelupdate.rs` | 内核下载/更新：GitHub Release 探测、资产选择、下载解压、替换并重启 | `KernelUpdateReport`、`update_kernel`、`latest_version`、`installed_version`、`extract_version` |
 | `src/appupdate.rs` | clash-tui 自身版本与自更新：编译期版本注入、GitHub 探测、下载替换并重启 | `VERSION`、`version_label`、`check_latest`、`update_app`、`restart_into_new_binary` |
+| `src/diagnostics.rs` | 内核体检与日志查看：进程/REST/版本/端口/配置检查，日志尾部读取与级别分类 | `HealthItem`、`collect_health`、`read_log_tail`、`classify_log_line`、`filter_lines` |
 | `build.rs` | 编译期向二进制注入 `CLASH_TUI_VERSION`（CI tag 优先，本地回退 `git describe`，开发版带 `-dirty` 后缀） | — |
-| `src/subscriptions.rs` | 订阅 CRUD、下载解析、**生成本地生效配置** | `SubscriptionManager::{add, delete, set_active, update_subscription}`、`parse_node_count` |
-| `src/rules.rs` | 自定义域名路由规则：持久化、解析、YAML 注入 | `RuleManager`、`RuleTarget`、`parse_domain_input`、`resolve_proxy_target`、`inject_domain_rules`、`apply_rules_to_config` |
+| `src/subscriptions.rs` | 订阅 CRUD、下载解析、流量/到期、自动更新调度、**生成本地生效配置** | `SubscriptionManager::{add, update_meta, delete, set_active, cycle_auto_update, due_subscriptions}`、`download_and_update`、`parse_userinfo`、`parse_node_count` |
+| `src/rules.rs` | 自定义路由规则：持久化、解析、多类型/目标组、优先级、命中推演、YAML 注入 | `RuleManager`、`RuleTarget`、`parse_domain_input`、`resolve_proxy_target`、`inject_domain_rules`、`probe_domain`、`apply_rules_to_config` |
 | `src/dnsconf.rs` | DNS 覆盖配置：持久化 `data/dns.json`、`dns` 段注入与校验 | `DnsManager`、`DnsSettings`、`DnsPolicy`、`inject_dns_settings`、`parse_list`、`parse_policies` |
+| `src/overrides.rs` | 运行配置覆盖：持久化 `data/overrides.json`、顶层 `mode`/`log-level`/`allow-lan`/`ipv6`/`unified-delay` 注入与校验 | `OverridesManager`、`OverridesSettings`、`inject_overrides`、`normalize_mode`、`normalize_log_level` |
 | `src/sysproxy.rs` | 系统代理（WinINet / macOS networksetup） | `SysProxy::{get_status, set_proxy}` |
 | `src/envproxy.rs` | 环境变量代理 + shell 脚本生成 | `EnvProxy::{get_status, set_env_proxy, generate_shell_scripts}` |
 | `src/theme.rs` | Cyber Neon HUD 调色板与组件样式 | `Theme::{GREEN, CYAN, LAVENDER, latency_badge, protocol_color, ...}` |
@@ -95,6 +97,8 @@ clash-tui/
 | `CoreActionDone` | 内核启停 task | 状态提示 |
 | `KernelProgress / KernelUpdateDone` | 内核更新 task（Settings 页按 `K`） | 下载进度、更新结果与版本同步 |
 | `AppUpdateChecked / AppUpdateProgress / AppUpdateDone` | 启动静默检查 task、Settings 页按 `U` 的自更新 task | 新版本提示、下载进度、安装完成后退出发起重启 |
+| `HealthChecked(Vec<HealthItem>)` | Settings 页按 `H` 的体检 task（混合 `spawn_blocking` 做端口探测与 `-v`） | 写入体检弹窗的检查项 |
+| `LogsLoaded(Result<Vec<String>, String>)` | Settings 页按 `L` / 日志弹窗按 Enter 的 `spawn_blocking` 读取 | 写入日志弹窗的尾部行 |
 | `TunToggled / PortChanged` | TUN/端口修改 task | 回读实际状态并联动 SysProxy/EnvProxy |
 
 ### 4.2 启动流程（`main()`）
@@ -125,45 +129,54 @@ clash-tui/
               注入 external-controller=127.0.0.1:9090、mixed-port
               写入 data/config.yaml          ← 内核实际加载的文件
                                         │
-              crate::rules::apply_rules_to_config()   ← 注入自定义域名规则 + DNS 覆盖
+              crate::rules::apply_rules_to_config()   ← 注入自定义域名规则 + DNS 覆盖 + 运行配置覆盖
                                         ▼
               client.reload_config(get_clean_config_path())
               （PUT /configs?force=true，path 为去掉 \\?\ 前缀的绝对路径）
 ```
 
 - `set_active`：激活订阅（Enter）时调用；
-- `update_subscription`：更新订阅（`u`/`U`）后，若该订阅是 active 则自动重写配置；
+- `download_and_update`：更新订阅（`u`/`U`/自动更新/新增与编辑）时调用；下载成功后存入 `profiles/{sub_id}.yaml`（先写 `.yaml.tmp` 再 rename），若该订阅是 active 则自动重写配置；
+- **流量/到期**：读取响应头 `subscription-userinfo`（`upload/download/total/expire`，分号分隔），经 `parse_userinfo` 写入订阅项，供列表 TRAFFIC / EXPIRY 列展示；
+- **自动更新**：`subscriptions.json` 的 `auto_update_minutes`（默认 1440，`i` 键循环 0/60/360/1440）；主循环 `AppEvent::Tick` 每 60 秒调用一次 `due_subscriptions()`（按 `last_updated` 与间隔判断到期），对到期且不在 `updating_subs` 中的订阅调用 `spawn_sub_download`；
 - reload 失败无自动重启（Python 旧版有 restart fallback，已移除），用户可按 `S` 重启内核；
 - Mock 订阅（URL 含 `example.com`/`demo`）返回假数据用于演示。
 
-### 5.2 自定义域名路由规则（Rules 页，按键 `5`）
+### 5.2 自定义路由规则（Rules 页，按键 `5`）
 
-**功能**：用户录入域名/关键字，并为每条规则单独指定去向——**DIRECT（直连）** 或 **PROXY（走代理组）**。
+**功能**：用户录入域名 / IP 段 / geosite / ruleset / 进程名，并为每条规则单独指定去向——**DIRECT（直连）**、**PROXY（默认代理组）** 或某个**指定策略组**；支持调整优先级与域名命中推演。
 
-**持久化** `rules.json`（JSON 数组；`target` 缺省为 `PROXY`，兼容旧存档）：
+**持久化** `rules.json`（JSON 数组；`target` 缺省为 `PROXY`，`group` 缺省为 `null`，兼容旧存档）：
 
 ```json
 [
   { "rule_type": "DOMAIN-SUFFIX", "value": "example.com", "target": "PROXY" },
   { "rule_type": "DOMAIN", "value": "api.example.com", "target": "DIRECT" },
-  { "rule_type": "DOMAIN-KEYWORD", "value": "openai", "target": "PROXY" }
+  { "rule_type": "GEOSITE", "value": "netflix", "target": "PROXY", "group": "Streaming" },
+  { "rule_type": "IP-CIDR", "value": "10.0.0.0/8", "target": "DIRECT" }
 ]
 ```
 
-**输入语法**（`parse_domain_input` → `ParsedRuleInput`）：最前面可选去向前缀 `direct:` / `proxy:`（优先于弹窗内 `Tab` 选择），其后可选类型前缀：`example.com` → DOMAIN-SUFFIX；`full:example.com` 或 `domain:...` → DOMAIN；`keyword:xxx` → DOMAIN-KEYWORD；`suffix:xxx` → DOMAIN-SUFFIX；可组合为 `direct:full:api.example.com`。含空格/逗号或空值视为非法。
+**输入的规则类型**（`parse_domain_input` → `ParsedRuleInput`）：`example.com` → DOMAIN-SUFFIX；`full:example.com` / `domain:...` → DOMAIN；`keyword:xxx` → DOMAIN-KEYWORD；`ip-cidr:10.0.0.0/8`（或 `cidr:`）→ IP-CIDR；`geosite:cn` / `site:` → GEOSITE；`rule-set:proxy` / `ruleset:` / `set:` → RULE-SET；`process:chrome` / `proc:` → PROCESS。最前面可加去向前缀 `direct:` / `proxy:`（优先于弹窗内 `Tab` 选择）；IP-CIDR 校验地址与前缀长度，其余类型仅要求非空。含空格/逗号或空值视为非法。
 
 **注入**（`inject_domain_rules`）：
 
-1. `resolve_proxy_target` 从 `data/config.yaml` 选 PROXY 类规则使用的目标代理组，优先级：
+1. `resolve_proxy_target` 从 `data/config.yaml` 选默认目标代理组，优先级：
    `proxy-groups` 中名字含 `proxy` 的组 → 第一个非 direct/reject 组 → 第一个组 → `proxies[0].name` → `DIRECT`；
-2. 生成规则行 `TYPE,VALUE,TARGET`：`target=Direct` 写 `DIRECT`，`target=Proxy` 写解析出的代理组名；**插入 `rules` 列表最顶部**（Clash 规则自上而下匹配，顶部即最高优先级，先于订阅自带规则和 `MATCH`）；
+2. 生成规则行 `TYPE,VALUE,TARGET`：`target=Direct` 写 `DIRECT`，`target=Proxy` 优先写规则自带的 `group`，否则写默认代理组；**插入 `rules` 列表最顶部**（Clash 规则自上而下匹配，顶部即最高优先级，先于订阅自带规则和 `MATCH`）；
 3. **DNS 策略**：DIRECT 规则的 `system` 解析策略与用户 DNS 覆盖统一由 `dnsconf.rs` 的 `inject_dns_settings` 注入（规则见 5.6）；`inject_domain_rules` 只负责规则行与去重；
 4. **去重**：注入前先删除 `rules` 中 payload（第二个逗号字段）与本次自定义域名相同的旧条目（上次注入的、目标已改的、类型已改的都算），再插入新规则，避免反复 apply 造成重复堆积；其余订阅规则及其顺序原样保留；
 5. 通过 `serde_yaml::Value` 操作，保留订阅配置其余字段不变。
 
+**交互**（Rules 页）：
+
+- `a` 新增：弹窗内 `Tab` / ← / → 在 `DIRECT` → `PROXY (auto)` → 各可选策略组之间循环（可选组来自配置 `proxy-groups`，打开弹窗时刷新）；
+- `t` 对选中规则做同样的循环切换；`K` / `J` 上移 / 下移规则（交换相邻项）——两者都会重新 `apply_rules_to_config()` 并热重载；
+- `f` 命中推演：读取 `data/config.yaml` 的 `rules`，自上而下匹配 `DOMAIN` / `DOMAIN-SUFFIX` / `DOMAIN-KEYWORD` / `MATCH`，显示命中的第 N 条；遇到 `IP-CIDR` / `RULE-SET` / `GEOSITE` / `PROCESS` 等需内核语义的类型时停止并提示"需内核解析"（无法本地确定是否命中）。
+
 **注意**：`nameserver-policy` 写的是 `system`，即走操作系统 DNS（公司/路由器下发的内部 DNS）；若订阅本身已为同域名配置了内网 DNS 服务器，则保留订阅的值不动。
 
-**生效时机**：`RuleManager::add/remove/toggle_target` 后、`subscriptions.rs` 两个写配置点之后，统一调用无状态函数 `apply_rules_to_config() -> (规则数, 目标组)`（内部重新读 rules.json + data/config.yaml），随后由调用方 `reload_config` 热重载。订阅切换/内核重启不丢规则。
+**生效时机**：`RuleManager::add/remove/cycle_destination/move_up/move_down` 后、`subscriptions.rs` 两个写配置点之后，统一调用无状态函数 `apply_rules_to_config() -> (规则数, 目标组)`（内部重新读 rules.json + data/config.yaml），随后由调用方 `reload_config` 热重载。订阅切换/内核重启不丢规则。
 
 ### 5.3 代理控制三件套
 
@@ -251,15 +264,58 @@ clash-tui/
 
 `App.show_help` 为 true 时 `render_help_modal` 在全部面板之上绘制双栏帮助：左栏全局键（退出、Tab/数字键、移动、模式、代理开关、端口、重载），右栏各标签页动作与弹窗按键。`handle_key_event` 在模态弹窗分支之前优先处理该浮层，此时只接受 `Esc` / `?` / `q` 关闭，其余按键一律吞掉——避免在帮助界面误触发停内核、删规则等操作。
 
+### 5.10 内核体检与日志查看（Settings 页，按键 `H` / `L`）
+
+**体检**（`diagnostics::collect_health`）：在后台任务里依次收集并写入 `HealthModal`：
+
+| 检查项 | 手段 | 异常提示 |
+|---|---|---|
+| 内核进程 | `CoreManager::process_alive()`（`tasklist` / `pkill -0`） | 未检测到 mihomo 进程 |
+| REST 控制器 | `ClashClient::get_version()`（2s 超时） | 不可达 / 超时 |
+| 磁盘二进制 | `kernelupdate::installed_version(bin)`（`spawn_blocking` 跑 `-v`） | 未安装 / 无法读取版本 |
+| 版本一致性 | 运行版本 vs 磁盘版本（去 `v` 前缀比较） | 不一致 → 提示按 `S` 重启 |
+| 混合代理端口 | `TcpStream::connect_timeout(127.0.0.1:mixed_port, 600ms)` | 无法连接（未启动或端口被占用） |
+| 生效配置 | `data/config.yaml` 存在且非空 | 缺失（订阅未激活？） |
+| 内核日志 | `data/mihomo.log` 大小（仅展示） | — |
+
+弹窗内 `Esc` 关闭、`H` / `r` 重新检查；结果状态色：`✔` 绿 / `✘` 红 / `·` 灰（仅参考）。
+
+**日志**（`diagnostics::read_log_tail`）：有 `spawn_blocking` 读取 `data/mihomo.log` 尾部（最多 256KB、保留最后 400 行），弹窗内按行过滤（`filter_lines`，大小写不敏感、只保留最后 300 条匹配），并按 `classify_log_line` 上色：`error/fatal/panic` 红、`warn` 黄、`info` 灰、其余暗色。`Enter` 重新读取、Backspace 删除过滤字符、`Esc` 关闭。
+
+连接页同时展示每条连接的 `PROCESS` 列（`metadata.processPath` 的文件名，去掉 `.exe`，过长截断）。
+
+### 5.11 运行配置覆盖（Settings 页，按键 `C`）
+
+订阅源经常自带 `mode`/`log-level`/`allow-lan`/`ipv6`/`unified-delay`，直接改 `data/config.yaml` 会被下一次订阅更新冲掉。`overrides.rs` 提供一层显式覆盖：
+
+**持久化** `data/overrides.json`（`OverridesSettings`，字段全为可空）：
+
+```json
+{
+  "mode": "rule",
+  "log_level": "info",
+  "allow_lan": true,
+  "ipv6": false,
+  "unified_delay": true
+}
+```
+
+**注入** `inject_overrides(&mut Value, &settings)`：只写非 `null` 项到 YAML 顶层（`mode`、`log-level`、`allow-lan`、`ipv6`、`unified-delay`），其余键原样保留；空设置完全不改动 YAML。`normalize_mode` / `normalize_log_level` 校验取值（`rule|global|direct`、`silent|error|warning|info|debug`，大小写不敏感），加载 JSON 时 `sanitize()` 会把非法值丢弃。
+
+**交互**（`OverridesModal`，Settings → `C`）：`Tab`/`↓` 下一项、`Shift+Tab`/`↑` 上一项、`Space`/`←`/`→` 在 `INHERIT → 合法值 → …` 之间循环，`Enter` 保存 → `apply_rules_to_config()` 注入 → `reload_config` 热重载，`Esc` 取消。改 `mode` 会立即切换内核分流模式（订阅重新激活后仍保持）。
+
+**流水线**：保存后写 `data/overrides.json` → `rules::apply_rules_to_config()`（内部依次注入规则、DNS、运行配置覆盖）→ `reload_config` 热重载。
+
 ---
 
 ## 6. 数据文件格式
 
 | 文件 | 格式 | 写入者 | 说明 |
 |---|---|---|---|
-| `subscriptions.json` | `Vec<SubscriptionItem>`：`{id, name, url, active, node_count, last_updated}` | subscriptions.rs | id 格式 `sub_{unix_ts}`，同时是 profile 文件名 |
-| `rules.json` | `Vec<RuleItem>`：`{rule_type, value, target}` | rules.rs | 见 5.2 |
+| `subscriptions.json` | `{auto_update_minutes, items: Vec<SubscriptionItem>}`：item `{id, name, url, active, node_count, last_updated, upload, download, total, expire}` | subscriptions.rs | id 格式 `sub_{unix_ts}`，同时是 profile 文件名；旧版裸数组可自动升级 |
+| `rules.json` | `Vec<RuleItem>`：`{rule_type, value, target, group?}`，target ∈ DIRECT/PROXY，group 为 PROXY 时可选指定策略组 | rules.rs | 见 5.2 |
 | `data/dns.json` | `DnsSettings`：`{direct_use_system_dns, nameserver, fallback, proxy_server_nameserver, default_nameserver, policies}` | dnsconf.rs | 见 5.6 |
+| `data/overrides.json` | `OverridesSettings`：`{mode?, log_level?, allow_lan?, ipv6?, unified_delay?}`（`null`/缺省 = 沿用订阅） | overrides.rs | 见 5.11 |
 | `profiles/{sub_id}.yaml` | 订阅原始内容（Clash YAML 或 base64 节点列表） | subscriptions.rs | 只存原始内容，不做加工 |
 | `data/config.yaml` | Mihomo 完整配置 | subscriptions.rs + rules.rs | 唯一生效配置，内核以 `-d data` 加载 |
 | `data/mihomo.log` | 追加日志 | mihomo 内核 | 排障入口 |

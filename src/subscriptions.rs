@@ -1,8 +1,13 @@
-use chrono::Local;
+use chrono::{Local, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// 默认自动更新间隔（分钟）：24 小时
+pub const DEFAULT_AUTO_UPDATE_MINUTES: u32 = 1440;
+/// 订阅页 `i` 键循环的自动更新间隔：关闭 / 1 小时 / 6 小时 / 24 小时
+pub const AUTO_UPDATE_CHOICES: [u32; 4] = [0, 60, 360, 1440];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionItem {
@@ -12,6 +17,25 @@ pub struct SubscriptionItem {
     pub active: bool,
     pub node_count: usize,
     pub last_updated: String,
+    /// 订阅流量（字节），来自响应头 `subscription-userinfo`
+    #[serde(default)]
+    pub upload: u64,
+    #[serde(default)]
+    pub download: u64,
+    #[serde(default)]
+    pub total: u64,
+    /// 套餐到期 Unix 时间戳；0 表示未知
+    #[serde(default)]
+    pub expire: i64,
+}
+
+/// 订阅响应头 `subscription-userinfo` 解析结果
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SubUserinfo {
+    pub upload: u64,
+    pub download: u64,
+    pub total: u64,
+    pub expire: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +45,19 @@ pub struct SubUpdateResult {
     pub node_count: usize,
     pub last_updated: String,
     pub is_active: bool,
+    pub userinfo: SubUserinfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubscriptionStore {
+    #[serde(default = "default_auto_update_minutes")]
+    auto_update_minutes: u32,
+    #[serde(default)]
+    items: Vec<SubscriptionItem>,
+}
+
+fn default_auto_update_minutes() -> u32 {
+    DEFAULT_AUTO_UPDATE_MINUTES
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +65,8 @@ pub struct SubscriptionManager {
     pub file_path: PathBuf,
     pub profiles_dir: PathBuf,
     pub subscriptions: Vec<SubscriptionItem>,
+    /// 自动更新间隔（分钟，0 = 关闭）
+    pub auto_update_minutes: u32,
 }
 
 impl SubscriptionManager {
@@ -40,6 +79,7 @@ impl SubscriptionManager {
             file_path,
             profiles_dir,
             subscriptions: Vec::new(),
+            auto_update_minutes: DEFAULT_AUTO_UPDATE_MINUTES,
         };
         mgr.load();
         mgr
@@ -48,6 +88,13 @@ impl SubscriptionManager {
     pub fn load(&mut self) {
         if self.file_path.exists() {
             if let Ok(content) = fs::read_to_string(&self.file_path) {
+                // 新格式：{ auto_update_minutes, items }
+                if let Ok(store) = serde_json::from_str::<SubscriptionStore>(&content) {
+                    self.subscriptions = store.items;
+                    self.auto_update_minutes = store.auto_update_minutes;
+                    return;
+                }
+                // 旧格式：裸数组，沿用默认自动更新间隔
                 if let Ok(subs) = serde_json::from_str::<Vec<SubscriptionItem>>(&content) {
                     self.subscriptions = subs;
                     return;
@@ -60,7 +107,11 @@ impl SubscriptionManager {
     }
 
     pub fn save(&self) {
-        if let Ok(json) = serde_json::to_string_pretty(&self.subscriptions) {
+        let store = SubscriptionStore {
+            auto_update_minutes: self.auto_update_minutes,
+            items: self.subscriptions.clone(),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&store) {
             let _ = fs::write(&self.file_path, json);
         }
     }
@@ -69,6 +120,10 @@ impl SubscriptionManager {
         if let Some(sub) = self.subscriptions.iter_mut().find(|s| s.id == res.sub_id) {
             sub.node_count = res.node_count;
             sub.last_updated = res.last_updated.clone();
+            sub.upload = res.userinfo.upload;
+            sub.download = res.userinfo.download;
+            sub.total = res.userinfo.total;
+            sub.expire = res.userinfo.expire;
         }
         self.save();
     }
@@ -85,11 +140,33 @@ impl SubscriptionManager {
             active: is_first,
             node_count: 0,
             last_updated: "Never".to_string(),
+            upload: 0,
+            download: 0,
+            total: 0,
+            expire: 0,
         };
 
         self.subscriptions.push(item.clone());
         self.save();
         item
+    }
+
+    /// 编辑订阅名称/URL（不触发下载，由调用方按 URL 是否变化决定）
+    pub fn update_meta(
+        &mut self,
+        id: &str,
+        name: String,
+        url: String,
+    ) -> Option<SubscriptionItem> {
+        let updated = if let Some(sub) = self.subscriptions.iter_mut().find(|s| s.id == id) {
+            sub.name = name;
+            sub.url = url;
+            Some(sub.clone())
+        } else {
+            None
+        };
+        self.save();
+        updated
     }
 
     pub fn delete(&mut self, idx: usize) -> Option<SubscriptionItem> {
@@ -129,6 +206,31 @@ impl SubscriptionManager {
         Ok(active_sub)
     }
 
+    /// 循环切换自动更新间隔（关闭 → 1h → 6h → 24h → 关闭）
+    pub fn cycle_auto_update(&mut self) -> u32 {
+        let pos = AUTO_UPDATE_CHOICES
+            .iter()
+            .position(|m| *m == self.auto_update_minutes)
+            .unwrap_or(0);
+        let next = AUTO_UPDATE_CHOICES[(pos + 1) % AUTO_UPDATE_CHOICES.len()];
+        self.auto_update_minutes = next;
+        self.save();
+        next
+    }
+
+    /// 超过自动更新间隔、需要刷新的订阅
+    pub fn due_subscriptions(&self) -> Vec<SubscriptionItem> {
+        if self.auto_update_minutes == 0 {
+            return Vec::new();
+        }
+        let now = Local::now().naive_local();
+        self.subscriptions
+            .iter()
+            .filter(|s| is_due(&s.last_updated, self.auto_update_minutes, now))
+            .cloned()
+            .collect()
+    }
+
     pub async fn download_and_update(
         sub_id: String,
         sub_name: String,
@@ -160,6 +262,7 @@ impl SubscriptionManager {
                 node_count,
                 last_updated,
                 is_active,
+                userinfo: SubUserinfo::default(),
             });
         }
 
@@ -182,11 +285,23 @@ impl SubscriptionManager {
             return Err(format!("HTTP error {}", resp.status()));
         }
 
+        // subscription-userinfo 在下载 body 前读取
+        let userinfo = resp
+            .headers()
+            .get("subscription-userinfo")
+            .and_then(|v| v.to_str().ok())
+            .map(parse_userinfo)
+            .unwrap_or_default();
+
         let body = resp.text().await.map_err(|e| e.to_string())?;
         let node_count = parse_node_count(&body);
 
+        // 先写临时文件再替换，下载失败/中断不会破坏已有 profile
         let out_path = profiles_dir.join(format!("{}.yaml", sub_id));
-        let _ = fs::write(&out_path, &body);
+        let tmp_path = profiles_dir.join(format!("{}.yaml.tmp", sub_id));
+        fs::write(&tmp_path, &body).map_err(|e| format!("Failed to write profile: {}", e))?;
+        let _ = fs::remove_file(&out_path);
+        fs::rename(&tmp_path, &out_path).map_err(|e| format!("Failed to store profile: {}", e))?;
 
         let last_updated = Local::now().format("%Y-%m-%d %H:%M").to_string();
 
@@ -200,8 +315,48 @@ impl SubscriptionManager {
             node_count,
             last_updated,
             is_active,
+            userinfo,
         })
     }
+}
+
+/// 解析 `subscription-userinfo` 响应头，如 `upload=1; download=2; total=3; expire=4`
+pub fn parse_userinfo(header: &str) -> SubUserinfo {
+    let mut info = SubUserinfo::default();
+    for part in header.split(';') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        match key.as_str() {
+            "upload" => info.upload = value.parse().unwrap_or(0),
+            "download" => info.download = value.parse().unwrap_or(0),
+            "total" => info.total = value.parse().unwrap_or(0),
+            "expire" => info.expire = value.parse().unwrap_or(0),
+            _ => {}
+        }
+    }
+    info
+}
+
+/// 自动更新间隔的展示文本（Off / 1h / 6h / 24h）
+pub fn auto_update_label(minutes: u32) -> String {
+    match minutes {
+        0 => "Off".to_string(),
+        m if m % 60 == 0 => format!("{}h", m / 60),
+        m => format!("{}m", m),
+    }
+}
+
+fn is_due(last_updated: &str, minutes: u32, now: NaiveDateTime) -> bool {
+    if minutes == 0 {
+        return false;
+    }
+    let Ok(last) = NaiveDateTime::parse_from_str(last_updated, "%Y-%m-%d %H:%M") else {
+        return false;
+    };
+    (now - last).num_minutes() >= i64::from(minutes)
 }
 
 /// 将 profile 内容注入 external-controller、mixed-port 及自定义规则后部署到 data/config.yaml
@@ -280,4 +435,99 @@ fn parse_node_count(content: &str) -> usize {
     }
 
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn parses_subscription_userinfo() {
+        let info = parse_userinfo(
+            "upload=1073741824; download=2147483648; total=10737418240; expire=1767225600",
+        );
+        assert_eq!(info.upload, 1_073_741_824);
+        assert_eq!(info.download, 2_147_483_648);
+        assert_eq!(info.total, 10_737_418_240);
+        assert_eq!(info.expire, 1_767_225_600);
+    }
+
+    #[test]
+    fn tolerates_missing_and_malformed_userinfo_fields() {
+        let info = parse_userinfo("download=42; total=not-a-number; expire=");
+        assert_eq!(info.download, 42);
+        assert_eq!(info.total, 0);
+        assert_eq!(info.expire, 0);
+        assert_eq!(parse_userinfo(""), SubUserinfo::default());
+    }
+
+    #[test]
+    fn old_subscription_format_still_loads() {
+        let dir = std::env::temp_dir().join(format!("clash-tui-subs-test-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("subscriptions.json");
+        fs::write(
+            &path,
+            "[{\"id\":\"sub_1\",\"name\":\"Legacy\",\"url\":\"https://example.net/api\",\
+              \"active\":true,\"node_count\":3,\"last_updated\":\"2026-01-02 03:04\"}]",
+        )
+        .unwrap();
+
+        let mut mgr = SubscriptionManager {
+            file_path: path.clone(),
+            profiles_dir: dir.join("profiles"),
+            subscriptions: Vec::new(),
+            auto_update_minutes: DEFAULT_AUTO_UPDATE_MINUTES,
+        };
+        mgr.load();
+        assert_eq!(mgr.subscriptions.len(), 1);
+        assert_eq!(mgr.subscriptions[0].name, "Legacy");
+        assert_eq!(mgr.subscriptions[0].total, 0);
+        assert_eq!(mgr.auto_update_minutes, DEFAULT_AUTO_UPDATE_MINUTES);
+
+        // 保存后升级为新格式，仍可读回
+        mgr.save();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("auto_update_minutes"));
+        let mut second = SubscriptionManager {
+            file_path: path,
+            profiles_dir: dir.join("profiles"),
+            subscriptions: Vec::new(),
+            auto_update_minutes: 0,
+        };
+        second.load();
+        assert_eq!(second.subscriptions.len(), 1);
+        assert_eq!(second.auto_update_minutes, DEFAULT_AUTO_UPDATE_MINUTES);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_update_cycle_walks_through_choices() {
+        let dir = std::env::temp_dir().join(format!("clash-tui-cycle-test-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let mut mgr = SubscriptionManager {
+            file_path: dir.join("subscriptions.json"),
+            profiles_dir: dir.join("profiles"),
+            subscriptions: Vec::new(),
+            auto_update_minutes: 0,
+        };
+        assert_eq!(mgr.cycle_auto_update(), 60);
+        assert_eq!(mgr.cycle_auto_update(), 360);
+        assert_eq!(mgr.cycle_auto_update(), 1440);
+        assert_eq!(mgr.cycle_auto_update(), 0);
+        assert_eq!(auto_update_label(360), "6h");
+        assert_eq!(auto_update_label(90), "90m");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn due_depends_on_interval_and_last_update() {
+        let now = Local.with_ymd_and_hms(2026, 11, 20, 12, 0, 0).unwrap().naive_local();
+        assert!(is_due("2026-11-20 10:00", 60, now));
+        assert!(!is_due("2026-11-20 11:30", 60, now));
+        assert!(!is_due("Never", 60, now));
+        assert!(!is_due("2026-11-20 10:00", 0, now));
+        assert!(is_due("2026-11-19 11:00", 1440, now));
+    }
 }
