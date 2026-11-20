@@ -47,6 +47,13 @@
 - 🧩 **运行配置覆盖 (Settings → `C`)**：
   - 用 `Tab` 切换字段、`Space` 循环取值，覆盖 `mode` / `log-level` / `allow-lan` / `ipv6` / `unified-delay`；`INHERIT` 表示沿用订阅值。
   - 保存到 `data/overrides.json`，在 `apply_rules_to_config()` 中与规则、DNS 一起重新注入，订阅更新或重新激活不会冲掉。
+- 🗄 **本地配置备份 / 恢复 (Settings → `B`)**：
+  - `n` 立即把 `data/config.yaml`、`data/dns.json`、`data/overrides.json`、`rules.json` 打包到 `data/backups/backup-<时间戳>/`（不含订阅与 `profiles/`）。
+  - `Enter` 恢复选中备份（二次确认后覆盖现场），随后自动重新注入并热重载；`j`/`k` 选择，`Esc` 取消。
+- 🧩 **Providers 管理 (Settings → `V`)**：
+  - 以 `data/config.yaml` 的 `proxy-providers` / `rule-providers` 声明为准列出来源，`/providers/*` REST 数据只补条目数、`behavior` 与更新时间——内核 API 返回的策略组（`vehicleType: Compatible`）不会混进列表。
+  - `Tab` 在 PROXY / RULE 间切换，`u` 让内核重新拉取选中 provider，`r` 重新载入列表。
+- 📈 **流量历史 (Settings → `Y`)**：每秒采样上下行速率，保留最近 5 分钟；弹窗内显示双曲线、当前 / 峰值 / 平均速率和会话累计流量，`c` 清空重新积累。
 - ⬇️ **内核一键下载与更新 (Settings → `K`)**：
   - 自动从官方 `MetaCubeX/mihomo` GitHub Release 探测最新版本，按当前平台挑选资产（Windows `.zip` / Linux、macOS `.gz`），下载解压后替换 `bin/mihomo`。
   - 更新前自动停止内核并备份旧文件，写入成功后按需重启；GitHub 直连失败时自动回退到本地混合端口代理。
@@ -94,6 +101,9 @@
 | `K` (Shift+K) | **检查并下载/更新 Mihomo 内核**（设置页；自动停内核 → 替换 → 重启，缺失时直接安装） |
 | `H` | **内核体检**（进程 / REST / 版本一致性 / 端口 / 配置，异常红色标出）（设置页） |
 | `C` (Shift+C) | **运行配置覆盖**（`mode` / 日志级别 / `allow-lan` / `ipv6` / `unified-delay`）（设置页） |
+| `B` (Shift+B) | **本地配置备份 / 恢复**（`n` 备份，`Enter` 二次确认恢复）（设置页） |
+| `V` (Shift+V) | **Providers 管理**（proxy / rule providers 查看与重新拉取）（设置页） |
+| `Y` (Shift+Y) | **流量历史**（5 分钟上下行曲线 / 峰值 / 会话累计）（设置页） |
 | `L` | **内核日志查看**（`data/mihomo.log` 尾部，级别上色 + 关键字过滤）（设置页） |
 | `?` | 打开 / 关闭**全量快捷键帮助浮层**（`Esc`、`?` 或 `q` 关闭） |
 | `s` / `S` | 手动终止 / 普通重启后台 Mihomo 内核进程（设置页） |

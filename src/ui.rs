@@ -1,4 +1,4 @@
-use crate::app::{format_bytes, format_speed, ActiveTab, App, ModalField, ProxyFocus};
+use crate::app::{format_bytes, format_speed, ActiveTab, App, ModalField, ProxyFocus, TRAFFIC_HISTORY_CAP};
 use crate::appupdate;
 use crate::kernelupdate;
 use crate::rules::{ProbeOutcome, RuleTarget};
@@ -6,7 +6,7 @@ use crate::subscriptions::{auto_update_label, SubscriptionItem};
 use crate::theme::Theme;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
         Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation,
@@ -54,6 +54,15 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
     if let Some(modal) = &app.show_overrides_modal {
         render_overrides_modal(f, modal);
+    }
+    if let Some(modal) = &app.show_backup_modal {
+        render_backup_modal(f, modal);
+    }
+    if let Some(modal) = &app.show_providers_modal {
+        render_providers_modal(f, modal);
+    }
+    if app.show_traffic_modal {
+        render_traffic_modal(f, app);
     }
     if let Some(modal) = &app.show_health_modal {
         render_health_modal(f, modal);
@@ -1919,6 +1928,411 @@ fn render_overrides_modal(f: &mut Frame, modal: &crate::app::OverridesModal) {
     f.render_widget(Paragraph::new(help), chunks[6]);
 }
 
+fn render_backup_modal(f: &mut Frame, modal: &crate::app::BackupModal) {
+    let screen = f.area();
+    let width = 82.min(screen.width.saturating_sub(4)).max(50);
+    let height = (modal.entries.len() as u16 + 11)
+        .min(screen.height.saturating_sub(4))
+        .max(12);
+    let area = Rect {
+        x: screen.x + screen.width.saturating_sub(width) / 2,
+        y: screen.y + screen.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, area);
+
+    let title = format!(
+        " ◈ LOCAL CONFIG BACKUPS · {} ",
+        crate::backup::BACKUP_DIR
+    );
+    let block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD),
+        ))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Theme::active_border())
+        .style(Style::default().bg(Theme::MANTLE));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(2),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " 备份含 config.yaml / dns.json / overrides.json / rules.json（不含订阅与 profiles）",
+            Style::default().fg(Theme::MUTED),
+        ))),
+        chunks[0],
+    );
+
+    let mut lines: Vec<Line> = Vec::new();
+    if modal.entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  还没有备份，按 [n] 立即创建",
+            Style::default().fg(Theme::MUTED),
+        )));
+    }
+    for (i, entry) in modal.entries.iter().enumerate() {
+        let selected = i == modal.selected;
+        let marker = if selected { "❯" } else { " " };
+        let row_style = if selected {
+            Theme::selected_row_focused()
+        } else {
+            Theme::normal_row()
+        };
+        lines.push(
+            Line::from(vec![
+                Span::styled(
+                    format!("{marker} {:>2}. ", i + 1),
+                    Style::default().fg(Theme::MAUVE),
+                ),
+                Span::styled(
+                    entry.name.clone(),
+                    Style::default()
+                        .fg(if selected { Theme::TEXT } else { Theme::SUBTEXT0 })
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("   "),
+                Span::styled(
+                    format!("{} 个文件 · {}", entry.files, crate::backup::format_bytes(entry.bytes)),
+                    Style::default().fg(Theme::MUTED),
+                ),
+            ])
+            .style(row_style),
+        );
+    }
+    f.render_widget(Paragraph::new(lines), chunks[1]);
+
+    let bottom = if let Some(pending) = &modal.pending {
+        vec![
+            Line::from(Span::styled(
+                format!(" ⚠ 再按 Enter 确认用 {pending} 覆盖当前配置 · Esc 取消"),
+                Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                " [n] 新建备份   [Enter] 恢复选中（需二次确认）   [j/k] 选择   [Esc] 关闭",
+                Style::default().fg(Theme::SUBTEXT0),
+            )),
+        ]
+    } else {
+        vec![
+            Line::from(Span::styled(
+                " [n] 新建备份   [Enter] 恢复选中（需二次确认）   [j/k] 选择   [Esc] 关闭",
+                Style::default().fg(Theme::SUBTEXT0),
+            )),
+            Line::from(Span::styled(
+                " 恢复后会自动重新注入并热重载；如覆盖了配置，内核会立即应用",
+                Style::default().fg(Theme::MUTED),
+            )),
+        ]
+    };
+    f.render_widget(Paragraph::new(bottom), chunks[2]);
+}
+
+/// 把采样序列渲染为块字符曲线（`scale` 为本次运行峰值，0 表示全空）
+fn spark_bytes(values: &[u64], width: usize, scale: u64) -> String {
+    const LEVELS: [char; 8] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇'];
+    if values.is_empty() || width == 0 {
+        return String::new();
+    }
+    let take = values.len().min(width);
+    values[values.len() - take..]
+        .iter()
+        .map(|v| {
+            if scale == 0 {
+                return ' ';
+            }
+            let idx = ((*v as f64 / scale as f64) * 8.0).ceil().clamp(0.0, 8.0) as usize;
+            if idx == 0 {
+                ' '
+            } else {
+                LEVELS[idx.saturating_sub(1).min(7)]
+            }
+        })
+        .collect()
+}
+
+fn render_traffic_modal(f: &mut Frame, app: &App) {
+
+    let screen = f.area();
+    let width = 96.min(screen.width.saturating_sub(4)).max(60);
+    let height = 16.min(screen.height.saturating_sub(4)).max(10);
+    let area = Rect {
+        x: screen.x + screen.width.saturating_sub(width) / 2,
+        y: screen.y + screen.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " ◈ TRAFFIC HISTORY ",
+            Style::default()
+                .fg(Theme::TEAL)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Theme::active_border())
+        .style(Style::default().bg(Theme::MANTLE));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let samples = app.traffic_log.len();
+    let span = samples.min(TRAFFIC_HISTORY_CAP);
+    let scale = app
+        .traffic_peak_up
+        .max(app.traffic_peak_down)
+        .max(1);
+    let chart_width = inner.width.saturating_sub(2) as usize;
+
+    let ups: Vec<u64> = app.traffic_log.iter().map(|p| p.up).collect();
+    let downs: Vec<u64> = app.traffic_log.iter().map(|p| p.down).collect();
+    let avg = |values: &[u64]| -> u64 {
+        if values.is_empty() {
+            0
+        } else {
+            values.iter().sum::<u64>() / values.len() as u64
+        }
+    };
+
+    let heading = |icon: &str, color: Color, label: &str, now: u64, peak: u64, average: u64| {
+        Line::from(vec![
+            Span::styled(
+                format!(" {icon} {label:<9}"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("now {:>10}   peak {:>10}   avg {:>10}", format_speed(now), format_speed(peak), format_speed(average)),
+                Style::default().fg(Theme::TEXT),
+            ),
+        ])
+    };
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" 采样间隔 1s · 当前窗口 {span} 秒（最多 300 秒）"),
+            Style::default().fg(Theme::MUTED),
+        )),
+        Line::from(""),
+        heading("▲", Theme::PEACH, "UPLOAD", app.up_speed, app.traffic_peak_up, avg(&ups)),
+        Line::from(Span::styled(
+            format!("  {}", spark_bytes(&ups, chart_width, scale)),
+            Style::default().fg(Theme::PEACH),
+        )),
+        Line::from(""),
+        heading("▼", Theme::TEAL, "DOWNLOAD", app.down_speed, app.traffic_peak_down, avg(&downs)),
+        Line::from(Span::styled(
+            format!("  {}", spark_bytes(&downs, chart_width, scale)),
+            Style::default().fg(Theme::TEAL),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Σ 会话累计  ", Style::default().fg(Theme::LAVENDER).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("↑ {}   ↓ {}", format_bytes(app.total_upload), format_bytes(app.total_download)),
+                Style::default().fg(Theme::TEXT),
+            ),
+        ]),
+        Line::from(Span::styled(
+            " 曲线按本次运行内的峰值自动缩放；清空后从下一个采样点重新积累",
+            Style::default().fg(Theme::MUTED),
+        )),
+        Line::from(Span::styled(
+            " [c] 清空历史   [Esc] 关闭",
+            Style::default().fg(Theme::SUBTEXT0),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_providers_modal(f: &mut Frame, modal: &crate::app::ProvidersModal) {
+    use crate::providers::ProviderKind;
+
+    fn clip(text: &str, width: usize) -> String {
+        let count = text.chars().count();
+        if count <= width {
+            text.to_string()
+        } else {
+            let mut s: String = text.chars().take(width.saturating_sub(1)).collect();
+            s.push('…');
+            s
+        }
+    }
+
+    let screen = f.area();
+    let kind = modal.kind;
+    let items: &[crate::providers::ProviderInfo] = match kind {
+        ProviderKind::Proxy => &modal.snapshot.proxies,
+        ProviderKind::Rule => &modal.snapshot.rules,
+    };
+    let width = 104.min(screen.width.saturating_sub(4)).max(60);
+    let height = (items.len() as u16 + 11)
+        .min(screen.height.saturating_sub(4))
+        .max(14);
+    let area = Rect {
+        x: screen.x + screen.width.saturating_sub(width) / 2,
+        y: screen.y + screen.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " ◈ PROVIDERS · data/config.yaml ",
+            Style::default()
+                .fg(Theme::SAPPHIRE)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Theme::active_border())
+        .style(Style::default().bg(Theme::MANTLE));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(3),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+
+    let tab = |label: &str, count: usize, active: bool| {
+        let text = format!(" {label} {count} ");
+        if active {
+            Span::styled(
+                text,
+                Style::default()
+                    .fg(Theme::BASE)
+                    .bg(Theme::SAPPHIRE)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(text, Style::default().fg(Theme::SUBTEXT0))
+        }
+    };
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::raw(" "),
+                tab("PROXY PROVIDERS", modal.snapshot.proxies.len(), kind == ProviderKind::Proxy),
+                Span::raw("  "),
+                tab("RULE PROVIDERS", modal.snapshot.rules.len(), kind == ProviderKind::Rule),
+                Span::raw("   [Tab] 切换"),
+            ]),
+            Line::from(Span::styled(
+                " 只列出 data/config.yaml 中 proxy-providers / rule-providers 声明的条目；内核 API 返回的策略组已过滤",
+                Style::default().fg(Theme::MUTED),
+            )),
+        ]),
+        chunks[0],
+    );
+
+    let header = Line::from(vec![
+        Span::styled(
+            format!(" {:<34}", "NAME"),
+            Style::default().fg(Theme::LAVENDER).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:<7}", "VEHICLE"),
+            Style::default().fg(Theme::LAVENDER).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:<10}", "BEHAVIOR"),
+            Style::default().fg(Theme::LAVENDER).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:>7}  ", "COUNT"),
+            Style::default().fg(Theme::LAVENDER).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("UPDATED", Style::default().fg(Theme::LAVENDER).add_modifier(Modifier::BOLD)),
+    ]);
+
+    let mut lines = vec![header];
+    if modal.loading {
+        lines.push(Line::from(Span::styled(
+            " ⟳ 正在载入 providers...",
+            Style::default().fg(Theme::YELLOW),
+        )));
+    } else if items.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " 当前作用域没有 provider（订阅配置里未声明）",
+            Style::default().fg(Theme::MUTED),
+        )));
+    }
+    for (i, p) in items.iter().enumerate() {
+        let selected = i == modal.selected;
+        let style = if selected {
+            Theme::selected_row_focused()
+        } else {
+            Theme::normal_row()
+        };
+        let behavior = p.behavior.as_deref().unwrap_or("-");
+        let unit = match p.kind {
+            ProviderKind::Proxy => "nodes",
+            ProviderKind::Rule => "rules",
+        };
+        lines.push(
+            Line::from(vec![
+                Span::styled(
+                    format!(" {:<34}", clip(&p.name, 34)),
+                    Style::default().fg(if selected { Theme::TEXT } else { Theme::SUBTEXT0 }),
+                ),
+                Span::styled(format!("{:<7}", p.vehicle), Style::default().fg(Theme::TEAL)),
+                Span::styled(format!("{:<10}", behavior), Style::default().fg(Theme::SUBTEXT0)),
+                Span::styled(
+                    format!("{:>7}  ", format!("{} {unit}", p.count)),
+                    Style::default().fg(Theme::GREEN),
+                ),
+                Span::styled(p.updated.clone(), Style::default().fg(Theme::MUTED)),
+            ])
+            .style(style),
+        );
+    }
+    f.render_widget(Paragraph::new(lines), chunks[1]);
+
+    let status_line = if modal.loading {
+        Line::from(Span::styled(
+            " 正在载入...",
+            Style::default().fg(Theme::YELLOW),
+        ))
+    } else if let Some(message) = &modal.message {
+        Line::from(Span::styled(
+            format!(" {message}"),
+            Style::default().fg(Theme::PEACH),
+        ))
+    } else {
+        Line::from(Span::styled(
+            format!(" {} 个 provider", items.len()),
+            Style::default().fg(Theme::MUTED),
+        ))
+    };
+    f.render_widget(
+        Paragraph::new(vec![
+            status_line,
+            Line::from(Span::styled(
+                " [Tab] Proxy/Rule   [j/k] 选择   [u] 更新选中   [r] 重新载入   [Esc] 关闭",
+                Style::default().fg(Theme::SUBTEXT0),
+            )),
+        ]),
+        chunks[2],
+    );
+}
+
 fn render_edit_port_modal(f: &mut Frame, port_input: &str) {
     let area = centered_rect(52, 28, f.area());
     f.render_widget(Clear, area);
@@ -2062,6 +2476,9 @@ fn help_right_column(width: u16) -> Vec<Line<'static>> {
         help_section("SETTINGS", width),
         help_row("d", "DNS 覆盖编辑器"),
         help_row("C", "运行配置覆盖（mode / 日志级别 / LAN）"),
+        help_row("B", "本地配置备份 / 恢复"),
+        help_row("V", "proxy / rule providers 查看与更新"),
+        help_row("Y", "流量历史（峰值 / 会话总量）"),
         help_row("H", "内核体检（进程/版本/端口）"),
         help_row("L", "内核日志查看 / 过滤"),
         help_row("K", "下载 / 更新 Mihomo 内核"),
@@ -2087,7 +2504,7 @@ fn help_right_column(width: u16) -> Vec<Line<'static>> {
 fn render_help_modal(f: &mut Frame, area: Rect) {
     // 固定尺寸的紧凑对话框：内容约 24 行，不再撑满整屏留出大片空白。
     let width = 96.min(area.width.saturating_sub(2)).max(40);
-    let height = 32.min(area.height.saturating_sub(2)).max(11);
+    let height = 35.min(area.height.saturating_sub(2)).max(11);
     let popup = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -2139,7 +2556,7 @@ fn render_help_modal(f: &mut Frame, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "   · 按作用域分组 · 共 43 项",
+                "   · 按作用域分组 · 共 46 项",
                 Style::default().fg(Theme::MUTED),
             ),
         ])),
@@ -2321,6 +2738,12 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw("DNS  "),
                 Span::styled("[C] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
                 Span::raw("Config  "),
+                Span::styled("[B] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+                Span::raw("Backup  "),
+                Span::styled("[V] ", Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD)),
+                Span::raw("Providers  "),
+                Span::styled("[Y] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),
+                Span::raw("Traffic  "),
                 Span::styled("[H] ", Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD)),
                 Span::raw("Health  "),
                 Span::styled("[L] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
@@ -2493,8 +2916,6 @@ mod tests {
             .unwrap();
 
         let dump = dump_buffer(&terminal);
-        println!("{dump}");
-
         // 弹窗只占内容所需高度（30 行），上下留出背景
         assert_eq!(dump.lines().next().unwrap(), "");
         assert!(dump.contains("KEY BINDINGS"));
@@ -2530,6 +2951,90 @@ mod tests {
         assert!(dump.contains("allow-lan"));
         assert!(dump.contains("INHERIT"));
         assert!(dump.contains("RULE"));
+    }
+
+    #[test]
+    fn backup_modal_lists_entries_and_pending_warning() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let modal = crate::app::BackupModal {
+                    entries: vec![crate::backup::BackupEntry {
+                        name: "backup-20261120-120000".to_string(),
+                        files: 4,
+                        bytes: 2048,
+                    }],
+                    selected: 0,
+                    pending: Some("backup-20261120-120000".to_string()),
+                    loading: false,
+                };
+                render_backup_modal(f, &modal);
+            })
+            .unwrap();
+
+        let dump = dump_buffer(&terminal);
+        assert!(dump.contains("LOCAL CONFIG BACKUPS"));
+        assert!(dump.contains("backup-20261120-120000"));
+        assert!(dump.replace(' ', "").contains("再按Enter确认"));
+        assert!(dump.replace(' ', "").contains("Esc取消"));
+    }
+
+    #[test]
+    fn providers_modal_lists_configured_entries() {
+        use crate::providers::{ProviderInfo, ProviderKind, ProvidersSnapshot};
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let modal = crate::app::ProvidersModal {
+                    kind: ProviderKind::Rule,
+                    snapshot: ProvidersSnapshot {
+                        proxies: vec![ProviderInfo {
+                            name: "proxy-a".to_string(),
+                            kind: ProviderKind::Proxy,
+                            vehicle: "http".to_string(),
+                            behavior: None,
+                            count: 3,
+                            updated: "—".to_string(),
+                        }],
+                        rules: vec![ProviderInfo {
+                            name: "rules-a".to_string(),
+                            kind: ProviderKind::Rule,
+                            vehicle: "http".to_string(),
+                            behavior: Some("classical".to_string()),
+                            count: 12,
+                            updated: "2026-11-20 08:33".to_string(),
+                        }],
+                    },
+                    selected: 0,
+                    loading: false,
+                    message: None,
+                };
+                render_providers_modal(f, &modal);
+            })
+            .unwrap();
+
+        let dump = dump_buffer(&terminal);
+        assert!(dump.contains("PROVIDERS"));
+        assert!(dump.contains("RULE PROVIDERS"));
+        assert!(dump.contains("rules-a"));
+        assert!(dump.contains("classical"));
+        assert!(dump.contains("12 rules"));
+        assert!(dump.contains("2026-11-20 08:33"));
+        // 策略组被过滤：当前标签只显示 RULE 列，PROXY 条目不在正文
+        assert!(!dump.contains("proxy-a"));
+    }
+
+    #[test]
+    fn spark_bytes_takes_tail_and_normalizes_to_peak() {
+        assert_eq!(spark_bytes(&[], 10, 100), "");
+        assert_eq!(spark_bytes(&[0, 100], 2, 100), " ▇");
+        // 宽度不够时保留最近的样本
+        assert_eq!(spark_bytes(&[100, 0, 100], 2, 100), " ▇");
+        // 峰值为 0 时全空白
+        assert_eq!(spark_bytes(&[0, 0, 0], 3, 0), "   ");
     }
 
     #[test]

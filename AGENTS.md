@@ -41,6 +41,9 @@ clash-tui uninstall            # 卸载（移除 PATH，清理自启服务）
 | 自定义路由规则（多种类型 / DIRECT-PROXY-指定策略组 / 优先级调整 / 命中推演） | `src/rules.rs`（持久化 rules.json + YAML 注入 + 本地推演） |
 | DNS 覆盖配置（Settings → `d`） | `src/dnsconf.rs`（持久化 data/dns.json + 注入 config.yaml 的 dns 段） |
 | 运行配置覆盖（Settings → `C`） | `src/overrides.rs`（持久化 data/overrides.json + 注入 mode/log-level/allow-lan/ipv6/unified-delay） |
+| 本地配置备份 / 恢复（Settings → `B`） | `src/backup.rs`（`data/backups/` 快照、两步确认恢复） |
+| Providers 管理（Settings → `V`） | `src/providers.rs`（以 config.yaml 声明为准，过滤内核返回的策略组；`api.rs` 的 get/update provider） |
+| 流量历史（Settings → `Y`） | `app.rs` 的 `traffic_log`/峰值 + `update_traffic`；`ui.rs::render_traffic_modal`/`spark_bytes` |
 | 系统代理/环境变量代理 | `src/sysproxy.rs` / `src/envproxy.rs` |
 | 颜色样式 | `src/theme.rs`（统一走 `Theme::*`，勿硬编码色值） |
 

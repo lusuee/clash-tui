@@ -318,6 +318,66 @@ impl ClashClient {
             Err(format!("Set TUN failed: HTTP {}", resp.status()))
         }
     }
+
+    /// `GET /providers/proxies`（原始 JSON；会混入策略组，展示层按配置过滤）
+    pub async fn get_proxy_providers(&self) -> Result<serde_json::Value, String> {
+        let url = format!("{}/providers/proxies", self.base_url);
+        let resp = self
+            .request_builder(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        resp.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    }
+
+    /// `GET /providers/rules`
+    pub async fn get_rule_providers(&self) -> Result<serde_json::Value, String> {
+        let url = format!("{}/providers/rules", self.base_url);
+        let resp = self
+            .request_builder(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        resp.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    }
+
+    /// `PUT /providers/proxies/{name}`，让内核重新拉取该 provider
+    pub async fn update_proxy_provider(&self, name: &str) -> Result<(), String> {
+        let url = format!(
+            "{}/providers/proxies/{}",
+            self.base_url,
+            urlencoding_simple(name)
+        );
+        let resp = self
+            .request_builder(self.client.put(&url))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("Update proxy provider failed: HTTP {}", resp.status()))
+        }
+    }
+
+    /// `PUT /providers/rules/{name}`
+    pub async fn update_rule_provider(&self, name: &str) -> Result<(), String> {
+        let url = format!(
+            "{}/providers/rules/{}",
+            self.base_url,
+            urlencoding_simple(name)
+        );
+        let resp = self
+            .request_builder(self.client.put(&url))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("Update rule provider failed: HTTP {}", resp.status()))
+        }
+    }
 }
 
 fn urlencoding_simple(s: &str) -> String {

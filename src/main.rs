@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod appupdate;
+mod backup;
 mod core;
 mod diagnostics;
 mod dnsconf;
@@ -8,6 +9,7 @@ mod envproxy;
 mod installer;
 mod kernelupdate;
 mod overrides;
+mod providers;
 mod rules;
 mod subscriptions;
 mod sysproxy;
@@ -55,6 +57,14 @@ pub enum AppEvent {
     HealthChecked(Vec<diagnostics::HealthItem>),
     /// 内核日志尾部读取结果（Settings → L）
     LogsLoaded(Result<Vec<String>, String>),
+    /// 本地配置备份创建结果（Settings → B，`n`）
+    BackupCreated(Result<String, String>),
+    /// 本地配置恢复结果（Settings → B，Enter×2）
+    BackupRestored(Result<(String, usize), String>),
+    /// Providers 列表载入（Settings → V）
+    ProvidersLoaded(Result<crate::providers::ProvidersSnapshot, String>),
+    /// provider 更新结果（名称 + 类别）
+    ProviderUpdated(Result<(String, crate::providers::ProviderKind), String>),
 }
 
 fn print_help() {
@@ -447,6 +457,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     app.set_log_lines(result);
                 }
+                AppEvent::BackupCreated(result) => {
+                    match &result {
+                        Ok(name) => {
+                            app.set_status(format!("✔ 已创建备份 {name}"));
+                            let entries = crate::backup::list_backups(std::path::Path::new(
+                                crate::backup::BACKUP_DIR,
+                            ));
+                            app.set_backup_entries(entries);
+                        }
+                        Err(e) => app.set_status(format!("✘ 创建备份失败: {e}")),
+                    }
+                }
+                AppEvent::BackupRestored(result) => match result {
+                    Ok((name, restored)) => {
+                        app.reload_managers_from_disk();
+                        let (_, target) = rules::apply_rules_to_config();
+                        app.rule_mgr.target_hint = target;
+                        app.set_status(format!(
+                            "✔ 已恢复备份 {name}（{restored} 个文件），热重载中..."
+                        ));
+                        app.close_backup_modal();
+                        let client = app.client.clone();
+                        let full_path = get_clean_config_path();
+                        tokio::spawn(async move {
+                            let _ = client.reload_config(&full_path).await;
+                        });
+                    }
+                    Err(e) => app.set_status(format!("✘ 恢复备份失败: {e}")),
+                },
+                AppEvent::ProvidersLoaded(result) => match result {
+                    Ok(snapshot) => {
+                        let total = snapshot.total();
+                        app.set_providers_snapshot(snapshot);
+                        app.providers_modal_set_message(None);
+                        if total == 0 {
+                            app.set_status("✔ providers 已载入：当前配置未声明 proxy/rule providers");
+                        } else {
+                            app.set_status(format!("✔ providers 已载入（共 {total} 个）"));
+                        }
+                    }
+                    Err(e) => {
+                        app.providers_modal_set_message(Some(format!("载入失败: {e}")));
+                        app.set_status(format!("✘ 载入 providers 失败: {e}"));
+                    }
+                },
+                AppEvent::ProviderUpdated(result) => match result {
+                    Ok((name, kind)) => {
+                        app.set_status(format!(
+                            "✔ 已请求更新 {} provider {name}，正在重新载入...",
+                            kind.label()
+                        ));
+                        spawn_providers_load(&mut app, &tx);
+                    }
+                    Err(e) => app.set_status(format!("✘ 更新 provider 失败: {e}")),
+                },
                 AppEvent::TunToggled(res) => {
                     match res {
                         Ok(active) => {
@@ -612,6 +677,73 @@ fn spawn_logs_reload(tx: &mpsc::UnboundedSender<AppEvent>) {
     });
 }
 
+/// 后台创建本地配置备份
+fn spawn_backup_create(tx: &mpsc::UnboundedSender<AppEvent>) {
+    let tx_b = tx.clone();
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(|| {
+            crate::backup::create_backup(std::path::Path::new("."))
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("备份任务失败：{}", e)));
+        let _ = tx_b.send(AppEvent::BackupCreated(result));
+    });
+}
+
+/// 后台恢复指定备份（会覆盖当前配置）
+fn spawn_backup_restore(tx: &mpsc::UnboundedSender<AppEvent>, name: String) {
+    let tx_b = tx.clone();
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            let restored = crate::backup::restore_backup(std::path::Path::new("."), &name)?;
+            Ok((name.clone(), restored))
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("恢复任务失败：{}", e)));
+        let _ = tx_b.send(AppEvent::BackupRestored(result));
+    });
+}
+
+/// 读取配置里的 provider 声明 + REST 数据，载入弹窗列表
+fn spawn_providers_load(app: &mut App, tx: &mpsc::UnboundedSender<AppEvent>) {
+    let client = app.client.clone();
+    let tx_p = tx.clone();
+    tokio::spawn(async move {
+        let proxies = client.get_proxy_providers().await;
+        let rules = client.get_rule_providers().await;
+        let result = match (proxies, rules) {
+            (Ok(p), Ok(r)) => {
+                let config = tokio::task::spawn_blocking(|| {
+                    std::fs::read_to_string(crate::providers::CONFIG_PATH).unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                Ok(crate::providers::parse_snapshot(&config, &p, &r))
+            }
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        };
+        let _ = tx_p.send(AppEvent::ProvidersLoaded(result));
+    });
+}
+
+/// 让内核重新拉取指定 provider
+fn spawn_provider_update(
+    client: ClashClient,
+    tx: &mpsc::UnboundedSender<AppEvent>,
+    kind: crate::providers::ProviderKind,
+    name: String,
+) {
+    let tx_p = tx.clone();
+    tokio::spawn(async move {
+        let res = match kind {
+            crate::providers::ProviderKind::Proxy => client.update_proxy_provider(&name).await,
+            crate::providers::ProviderKind::Rule => client.update_rule_provider(&name).await,
+        };
+        let payload = res.map(|_| (name, kind));
+        let _ = tx_p.send(AppEvent::ProviderUpdated(payload));
+    });
+}
+
 async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSender<AppEvent>) {
     if key.kind != KeyEventKind::Press {
         return;
@@ -622,6 +754,79 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
         match key.code {
             KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
                 app.show_help = false;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // 流量历史弹窗（Settings → Y）
+    if app.show_traffic_modal {
+        match key.code {
+            KeyCode::Esc => app.close_traffic_modal(),
+            KeyCode::Char('c') => {
+                app.clear_traffic_history();
+                app.set_status("✔ 流量历史已清空");
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Providers 弹窗（Settings → V）
+    if app.show_providers_modal.is_some() {
+        match key.code {
+            KeyCode::Esc => app.close_providers_modal(),
+            KeyCode::Tab => app.providers_modal_toggle_kind(),
+            KeyCode::Char('j') | KeyCode::Down => app.providers_modal_next(),
+            KeyCode::Char('k') | KeyCode::Up => app.providers_modal_prev(),
+            KeyCode::Char('r') => {
+                app.providers_modal_set_message(Some("重新载入中...".to_string()));
+                spawn_providers_load(app, tx);
+            }
+            KeyCode::Char('u') => {
+                if let Some((name, kind)) = app.providers_modal_selected() {
+                    app.providers_modal_set_message(Some(format!("正在更新 {name}...")));
+                    spawn_provider_update(app.client.clone(), tx, kind, name);
+                } else {
+                    app.set_status("没有可更新的 provider");
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // 本地配置备份弹窗（Settings → B）
+    if app.show_backup_modal.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                if app.backup_modal_pending().is_some() {
+                    app.backup_modal_clear_pending();
+                    app.set_status("已取消恢复");
+                } else {
+                    app.close_backup_modal();
+                }
+            }
+            KeyCode::Char('j') | KeyCode::Down => app.backup_modal_next(),
+            KeyCode::Char('k') | KeyCode::Up => app.backup_modal_prev(),
+            KeyCode::Char('n') => {
+                app.set_status("正在创建本地配置备份...");
+                spawn_backup_create(tx);
+            }
+            KeyCode::Enter => {
+                if let Some(name) = app.backup_modal_pending() {
+                    app.backup_modal_clear_pending();
+                    app.set_status(format!("正在恢复备份 {name}..."));
+                    spawn_backup_restore(tx, name);
+                } else if let Some(name) = app.backup_modal_selected_name() {
+                    app.backup_modal_set_pending(name.clone());
+                    app.set_status(format!(
+                        "⚠ 将用备份 {name} 覆盖当前配置 / DNS / 覆盖 / 规则，再按 Enter 确认，Esc 取消"
+                    ));
+                } else {
+                    app.set_status("没有可恢复的备份，先按 n 创建");
+                }
             }
             _ => {}
         }
@@ -1240,6 +1445,24 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
         KeyCode::Char('H') => {
             if app.active_tab == ActiveTab::Settings {
                 spawn_health_check(app, tx);
+            }
+        }
+        KeyCode::Char('B') => {
+            if app.active_tab == ActiveTab::Settings {
+                app.open_backup_modal();
+                app.set_status("按 n 新建备份，Enter 恢复选中备份");
+            }
+        }
+        KeyCode::Char('V') => {
+            if app.active_tab == ActiveTab::Settings {
+                app.open_providers_modal();
+                app.set_status("载入 providers...");
+                spawn_providers_load(app, tx);
+            }
+        }
+        KeyCode::Char('Y') => {
+            if app.active_tab == ActiveTab::Settings {
+                app.open_traffic_modal();
             }
         }
         KeyCode::Char('C') => {

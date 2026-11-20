@@ -5,12 +5,23 @@ use crate::dnsconf::{format_policies, parse_list, parse_policies, DnsManager, Dn
 use crate::envproxy::EnvProxy;
 use crate::kernelupdate;
 use crate::overrides::{OverridesManager, OverridesSettings};
+use crate::providers::{ProviderInfo, ProviderKind, ProvidersSnapshot};
 use crate::rules::{RuleManager, RuleTarget};
 use crate::subscriptions::SubscriptionManager;
 use crate::sysproxy::SysProxy;
 use ratatui::widgets::TableState;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
+
+/// 流量历史采样上限（1s 一点 = 最近 5 分钟）
+pub const TRAFFIC_HISTORY_CAP: usize = 300;
+
+/// 每秒采样点（`up` / `down` 为字节/秒）
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TrafficPoint {
+    pub up: u64,
+    pub down: u64,
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ActiveTab {
@@ -116,6 +127,26 @@ pub struct LogModal {
 /// 运行配置覆盖弹窗的字段数
 pub const OVERRIDES_MODAL_FIELDS: usize = 5;
 
+/// 本地配置备份弹窗（Settings → `B`）
+#[derive(Debug, Clone)]
+pub struct BackupModal {
+    pub entries: Vec<crate::backup::BackupEntry>,
+    pub selected: usize,
+    /// 已请求恢复、等待二次确认的备份名
+    pub pending: Option<String>,
+    pub loading: bool,
+}
+
+/// Providers 弹窗（Settings → `V`）：proxy-providers / rule-providers 列表
+#[derive(Debug, Clone)]
+pub struct ProvidersModal {
+    pub kind: ProviderKind,
+    pub snapshot: ProvidersSnapshot,
+    pub selected: usize,
+    pub loading: bool,
+    pub message: Option<String>,
+}
+
 /// 运行配置覆盖弹窗（Settings → `C`）
 #[derive(Debug, Clone)]
 pub struct OverridesModal {
@@ -172,6 +203,13 @@ pub struct App {
     pub down_speed: u64,
     pub up_history: Vec<u64>,
     pub down_history: Vec<u64>,
+    /// 每秒采样点（最多 300 个），供流量历史弹窗绘制 5 分钟曲线
+    pub traffic_log: VecDeque<TrafficPoint>,
+    /// 本次运行内观察到的峰值速率
+    pub traffic_peak_up: u64,
+    pub traffic_peak_down: u64,
+    /// 流量历史弹窗（Settings → Y）
+    pub show_traffic_modal: bool,
 
     // Proxies View
     pub proxy_focus: ProxyFocus,
@@ -221,6 +259,10 @@ pub struct App {
     pub show_logs_modal: Option<LogModal>,
     /// 运行配置覆盖（Settings → C）
     pub show_overrides_modal: Option<OverridesModal>,
+    /// 本地配置备份（Settings → B）
+    pub show_backup_modal: Option<BackupModal>,
+    /// Providers 列表（Settings → V）
+    pub show_providers_modal: Option<ProvidersModal>,
     /// 快捷键帮助浮层（`?` 打开，Esc/`?`/`q` 关闭）
     pub show_help: bool,
 
@@ -276,6 +318,10 @@ impl App {
             down_speed: 0,
             up_history: vec![0; 36],
             down_history: vec![0; 36],
+            traffic_log: VecDeque::with_capacity(TRAFFIC_HISTORY_CAP),
+            traffic_peak_up: 0,
+            traffic_peak_down: 0,
+            show_traffic_modal: false,
 
             proxy_focus: ProxyFocus::Nodes,
             node_sort: NodeSort::Default,
@@ -309,6 +355,8 @@ impl App {
             show_edit_port_modal: None,
             show_dns_modal: None,
             show_overrides_modal: None,
+            show_backup_modal: None,
+            show_providers_modal: None,
             show_health_modal: None,
             show_logs_modal: None,
             show_help: false,
@@ -696,6 +744,29 @@ impl App {
         if self.down_history.len() > 36 {
             self.down_history.remove(0);
         }
+
+        self.traffic_log.push_back(TrafficPoint { up, down });
+        if self.traffic_log.len() > TRAFFIC_HISTORY_CAP {
+            self.traffic_log.pop_front();
+        }
+        self.traffic_peak_up = self.traffic_peak_up.max(up);
+        self.traffic_peak_down = self.traffic_peak_down.max(down);
+    }
+
+    /// 打开流量历史弹窗（Settings → `Y`）
+    pub fn open_traffic_modal(&mut self) {
+        self.show_traffic_modal = true;
+    }
+
+    pub fn close_traffic_modal(&mut self) {
+        self.show_traffic_modal = false;
+    }
+
+    /// 清空采样与峰值（会立即从下一个 Tick 重新积累）
+    pub fn clear_traffic_history(&mut self) {
+        self.traffic_log.clear();
+        self.traffic_peak_up = 0;
+        self.traffic_peak_down = 0;
     }
 
     pub fn update_proxies(&mut self, resp: HashMap<String, ProxyItem>) {
@@ -1014,6 +1085,169 @@ impl App {
         self.overrides_mgr.save();
         self.close_overrides_modal();
         Ok(settings)
+    }
+
+    // Backup modal (Settings → B)
+    pub fn open_backup_modal(&mut self) {
+        let entries = crate::backup::list_backups(std::path::Path::new(crate::backup::BACKUP_DIR));
+        self.show_backup_modal = Some(BackupModal {
+            entries,
+            selected: 0,
+            pending: None,
+            loading: false,
+        });
+    }
+
+    pub fn close_backup_modal(&mut self) {
+        self.show_backup_modal = None;
+    }
+
+    pub fn set_backup_entries(&mut self, entries: Vec<crate::backup::BackupEntry>) {
+        if let Some(modal) = &mut self.show_backup_modal {
+            modal.entries = entries;
+            modal.loading = false;
+            if modal.selected >= modal.entries.len() {
+                modal.selected = modal.entries.len().saturating_sub(1);
+            }
+        }
+    }
+
+    pub fn backup_modal_next(&mut self) {
+        if let Some(modal) = &mut self.show_backup_modal {
+            if !modal.entries.is_empty() {
+                modal.selected = (modal.selected + 1) % modal.entries.len();
+            }
+        }
+    }
+
+    pub fn backup_modal_prev(&mut self) {
+        if let Some(modal) = &mut self.show_backup_modal {
+            if !modal.entries.is_empty() {
+                modal.selected = (modal.selected + modal.entries.len() - 1) % modal.entries.len();
+            }
+        }
+    }
+
+    /// 返回当前选中备份名（用于恢复）；同时清掉待确认状态。
+    pub fn backup_modal_selected_name(&mut self) -> Option<String> {
+        let modal = self.show_backup_modal.as_mut()?;
+        if modal.entries.is_empty() {
+            return None;
+        }
+        let name = modal.entries[modal.selected].name.clone();
+        Some(name)
+    }
+
+    pub fn backup_modal_set_pending(&mut self, name: String) {
+        if let Some(modal) = &mut self.show_backup_modal {
+            modal.pending = Some(name);
+        }
+    }
+
+    pub fn backup_modal_clear_pending(&mut self) {
+        if let Some(modal) = &mut self.show_backup_modal {
+            modal.pending = None;
+        }
+    }
+
+    pub fn backup_modal_pending(&self) -> Option<String> {
+        self.show_backup_modal
+            .as_ref()
+            .and_then(|m| m.pending.clone())
+    }
+
+    // ---- Providers（Settings → V） ----
+
+    pub fn open_providers_modal(&mut self) {
+        self.show_providers_modal = Some(ProvidersModal {
+            kind: ProviderKind::Rule,
+            snapshot: ProvidersSnapshot::default(),
+            selected: 0,
+            loading: true,
+            message: None,
+        });
+    }
+
+    pub fn close_providers_modal(&mut self) {
+        self.show_providers_modal = None;
+    }
+
+    /// 载入结果：保留当前标签页与选中位置（列表可能变短）
+    pub fn set_providers_snapshot(&mut self, snapshot: ProvidersSnapshot) {
+        if let Some(modal) = &mut self.show_providers_modal {
+            modal.snapshot = snapshot;
+            modal.loading = false;
+            let len = match modal.kind {
+                ProviderKind::Proxy => modal.snapshot.proxies.len(),
+                ProviderKind::Rule => modal.snapshot.rules.len(),
+            };
+            if modal.selected >= len {
+                modal.selected = len.saturating_sub(1);
+            }
+        }
+    }
+
+    pub fn providers_modal_set_message(&mut self, message: Option<String>) {
+        if let Some(modal) = &mut self.show_providers_modal {
+            modal.message = message;
+        }
+    }
+
+    pub fn providers_modal_toggle_kind(&mut self) {
+        if let Some(modal) = &mut self.show_providers_modal {
+            modal.kind = match modal.kind {
+                ProviderKind::Proxy => ProviderKind::Rule,
+                ProviderKind::Rule => ProviderKind::Proxy,
+            };
+            modal.selected = 0;
+        }
+    }
+
+    pub fn providers_modal_len(&self) -> usize {
+        let Some(modal) = &self.show_providers_modal else {
+            return 0;
+        };
+        match modal.kind {
+            ProviderKind::Proxy => modal.snapshot.proxies.len(),
+            ProviderKind::Rule => modal.snapshot.rules.len(),
+        }
+    }
+
+    pub fn providers_modal_next(&mut self) {
+        let len = self.providers_modal_len();
+        if len == 0 {
+            return;
+        }
+        if let Some(modal) = &mut self.show_providers_modal {
+            modal.selected = (modal.selected + 1) % len;
+        }
+    }
+
+    pub fn providers_modal_prev(&mut self) {
+        let len = self.providers_modal_len();
+        if len == 0 {
+            return;
+        }
+        if let Some(modal) = &mut self.show_providers_modal {
+            modal.selected = (modal.selected + len - 1) % len;
+        }
+    }
+
+    /// 当前选中项（name + kind），用于触发更新
+    pub fn providers_modal_selected(&self) -> Option<(String, ProviderKind)> {
+        let modal = self.show_providers_modal.as_ref()?;
+        let item: Option<&ProviderInfo> = match modal.kind {
+            ProviderKind::Proxy => modal.snapshot.proxies.get(modal.selected),
+            ProviderKind::Rule => modal.snapshot.rules.get(modal.selected),
+        };
+        item.map(|p| (p.name.clone(), p.kind))
+    }
+
+    /// 恢复后让内存里的管理器与磁盘一致（rules.json 等直接被覆盖）。
+    pub fn reload_managers_from_disk(&mut self) {
+        self.dns_mgr = crate::dnsconf::DnsManager::new();
+        self.overrides_mgr = crate::overrides::OverridesManager::new();
+        self.rule_mgr = crate::rules::RuleManager::new();
     }
 
     pub fn rule_modal_handle_char(&mut self, c: char) {

@@ -41,7 +41,7 @@ clash-tui/
 ├── src/                  # 全部 Rust 源码（单二进制）
 ├── bin/                  # mihomo 内核二进制（gitignored，运行时放置）
 ├── data/                 # 内核运行目录（gitignored）：config.yaml、dns.json、overrides.json、mihomo.log、
-│                         # cache.db、geoip/geosite 数据、Rules/RuleSet
+│                         # cache.db、geoip/geosite 数据、Rules/RuleSet、backups/ 备份目录
 ├── profiles/             # 订阅原始下载存档 {sub_id}.yaml（gitignored）
 ├── subscriptions.json    # 订阅元数据（gitignored，含私密 URL）
 ├── rules.json            # 用户自定义域名路由规则（gitignored）
@@ -71,6 +71,8 @@ clash-tui/
 | `src/rules.rs` | 自定义路由规则：持久化、解析、多类型/目标组、优先级、命中推演、YAML 注入 | `RuleManager`、`RuleTarget`、`parse_domain_input`、`resolve_proxy_target`、`inject_domain_rules`、`probe_domain`、`apply_rules_to_config` |
 | `src/dnsconf.rs` | DNS 覆盖配置：持久化 `data/dns.json`、`dns` 段注入与校验 | `DnsManager`、`DnsSettings`、`DnsPolicy`、`inject_dns_settings`、`parse_list`、`parse_policies` |
 | `src/overrides.rs` | 运行配置覆盖：持久化 `data/overrides.json`、顶层 `mode`/`log-level`/`allow-lan`/`ipv6`/`unified-delay` 注入与校验 | `OverridesManager`、`OverridesSettings`、`inject_overrides`、`normalize_mode`、`normalize_log_level` |
+| `src/backup.rs` | 本地配置备份 / 恢复：`data/backups/backup-<时间戳>/` 下的 config/DNS/覆盖/规则快照 | `BackupEntry`、`create_backup`、`restore_backup`、`list_backups` |
+| `src/providers.rs` | Providers 列表：以 `data/config.yaml` 声明为准，合并 REST 统计（过滤内核返回的策略组噪音） | `ProviderInfo`、`ProviderKind`、`ProvidersSnapshot`、`parse_snapshot`、`format_updated` |
 | `src/sysproxy.rs` | 系统代理（WinINet / macOS networksetup） | `SysProxy::{get_status, set_proxy}` |
 | `src/envproxy.rs` | 环境变量代理 + shell 脚本生成 | `EnvProxy::{get_status, set_env_proxy, generate_shell_scripts}` |
 | `src/theme.rs` | Cyber Neon HUD 调色板与组件样式 | `Theme::{GREEN, CYAN, LAVENDER, latency_badge, protocol_color, ...}` |
@@ -99,6 +101,8 @@ clash-tui/
 | `AppUpdateChecked / AppUpdateProgress / AppUpdateDone` | 启动静默检查 task、Settings 页按 `U` 的自更新 task | 新版本提示、下载进度、安装完成后退出发起重启 |
 | `HealthChecked(Vec<HealthItem>)` | Settings 页按 `H` 的体检 task（混合 `spawn_blocking` 做端口探测与 `-v`） | 写入体检弹窗的检查项 |
 | `LogsLoaded(Result<Vec<String>, String>)` | Settings 页按 `L` / 日志弹窗按 Enter 的 `spawn_blocking` 读取 | 写入日志弹窗的尾部行 |
+| `ProvidersLoaded(Result<ProvidersSnapshot, String>)` | Settings 页按 `V` / providers 弹窗按 `r` 的载入任务（两路 REST + 读配置） | 写入弹窗快照并清空 loading |
+| `ProviderUpdated(Result<(String, ProviderKind), String>)` | providers 弹窗按 `u` 的 `PUT /providers/...` | 状态提示后自动重新载入列表 |
 | `TunToggled / PortChanged` | TUN/端口修改 task | 回读实际状态并联动 SysProxy/EnvProxy |
 
 ### 4.2 启动流程（`main()`）
@@ -306,6 +310,52 @@ clash-tui/
 
 **流水线**：保存后写 `data/overrides.json` → `rules::apply_rules_to_config()`（内部依次注入规则、DNS、运行配置覆盖）→ `reload_config` 热重载。
 
+### 5.12 本地配置备份 / 恢复（Settings 页，按键 `B`）
+
+`backup.rs` 在 `data/backups/` 下创建快照目录，备份四类用户可变的现场文件：
+
+| 现场文件 | 备份内名字 |
+|---|---|
+| `data/config.yaml` | `config.yaml` |
+| `data/dns.json` | `dns.json` |
+| `data/overrides.json` | `overrides.json` |
+| `rules.json` | `rules.json` |
+
+不包含订阅元数据、`profiles/` 与内核下载的数据（GEO、ASN、cache），避免体积失控。
+
+- `create_backup(root)`：备份名 `backup-{Local %Y%m%d-%H%M%S}`，同名时拒绝（『备份过于频繁』）；四类文件一个都不存在时报错，提示先激活订阅生成配置。
+- `restore_backup(root, name)`：校验名只允许 `backup-` + 字母数字/-/_（防目录穿越），逐对覆盖现场文件并 `create_dir_all` 父目录，返回恢复文件数。
+- `list_backups(dir)`：扫描安全目录名，统计文件数与字节数，按名倒序（最新在前）。
+
+**交互**（`BackupModal`，Settings → `B`）：`j`/`k`（或 `↑`/`↓`）选择，`n` 新建备份，`Esc` 关闭。恢复是两步确认：`Enter` 第一次只把选中项设为 `pending` 并显示红色警告（会覆盖当前配置 / DNS / 覆盖 / 规则），再按 `Enter` 才真正恢复，`Esc` 先取消 `pending`。恢复成功后重建 `dns_mgr`/`overrides_mgr`/`rule_mgr`，再走 `apply_rules_to_config()` + `reload_config` 热重载。
+
+### 5.13 Providers 管理（Settings 页，按键 `V`）
+
+`providers.rs` 解决一个数据源问题：内核的 `GET /providers/proxies` 会把**策略组**也返回（`vehicleType: Compatible`、`updatedAt` 为零值、字段是 `proxies` 而非 provider 定义），直接展示会让用户误以为它们是下载来源。
+
+**列表口径**：只列 `data/config.yaml` 里 `proxy-providers` / `rule-providers` 声明的条目；REST 数据仅用来补 `count`（`ruleCount` 或 `proxies.len()`）、`behavior`、`updatedAt`。配置里没有但 API 返回的条目（策略组）全部忽略。
+
+`parse_snapshot(config_yaml, api_proxies, api_rules) -> ProvidersSnapshot`：
+
+- `section_entries` 读 YAML 的 provider 段，取 `type` 作为 `vehicle`；
+- `format_updated` 把 `2026/11/20 8:33:14` 格式化为 `2026-11-20 08:33`，`0001/1/1 0:00:00` 显示 `—`，解析失败原样保留；
+- 结果按 `ProvidersSnapshot { proxies, rules }` 返回，`total()` 用于状态栏计数。
+
+**交互**（`ProvidersModal`，Settings → `V`）：打开即载入（`spawn_providers_load` 并行 GET 两个 provider 端点 + `spawn_blocking` 读配置）；`Tab` 在 PROXY / RULE 之间切换，`j`/`k`（或 `↑`/`↓`）选择，`u` 调 `PUT /providers/{proxies|rules}/{name}` 让内核重新拉取并自动重载列表，`r` 重新载入，`Esc` 关闭。
+
+> 当前配置没有 `proxy-providers` 时，PROXY 标签页为空是正常现象——弹窗会提示「当前配置未声明 providers」，而不是伪造条目。
+
+### 5.14 流量历史（Settings 页，按键 `Y`）
+
+数据来自 1s 一次的 `AppEvent::Traffic`（`/connections` 的 `uploadTotal/downloadTotal` 差分）：
+
+- `App::update_traffic` 同时维护头部 sparkline 的 36 点短历史，以及 `traffic_log: VecDeque<TrafficPoint>`（上限 `TRAFFIC_HISTORY_CAP = 300`，即 5 分钟）与本次运行峰值 `traffic_peak_up/down`；
+- 弹窗 `render_traffic_modal` 用块字符（`▁▂▃▄▅▆▇`）绘制上下行曲线，按 `max(peak_up, peak_down)` 统一缩放，两条曲线可直接比较；
+- 显示当前 / 峰值 / 平均速率，以及 `/connections` 返回的会话累计 `total_upload/download`；
+- `c` 清空采样与峰值（从下一个样本重新积累），`Esc` 关闭。
+
+纯函数 `spark_bytes(values, width, scale)` 负责“取尾部样本 + 归一化 + 块字符映射”，带单元测试。
+
 ---
 
 ## 6. 数据文件格式
@@ -316,6 +366,7 @@ clash-tui/
 | `rules.json` | `Vec<RuleItem>`：`{rule_type, value, target, group?}`，target ∈ DIRECT/PROXY，group 为 PROXY 时可选指定策略组 | rules.rs | 见 5.2 |
 | `data/dns.json` | `DnsSettings`：`{direct_use_system_dns, nameserver, fallback, proxy_server_nameserver, default_nameserver, policies}` | dnsconf.rs | 见 5.6 |
 | `data/overrides.json` | `OverridesSettings`：`{mode?, log_level?, allow_lan?, ipv6?, unified_delay?}`（`null`/缺省 = 沿用订阅） | overrides.rs | 见 5.11 |
+| `data/backups/backup-*/` | 目录：`config.yaml` / `dns.json` / `overrides.json` / `rules.json` 的快照 | backup.rs | 见 5.12 |
 | `profiles/{sub_id}.yaml` | 订阅原始内容（Clash YAML 或 base64 节点列表） | subscriptions.rs | 只存原始内容，不做加工 |
 | `data/config.yaml` | Mihomo 完整配置 | subscriptions.rs + rules.rs | 唯一生效配置，内核以 `-d data` 加载 |
 | `data/mihomo.log` | 追加日志 | mihomo 内核 | 排障入口 |
@@ -336,6 +387,8 @@ clash-tui/
 | PUT | `/proxies/{group}` | `select_proxy(group, node)` |
 | GET | `/proxies/{node}/delay?timeout=&url=` | `test_delay` |
 | GET | `/connections` | `get_connections`（含 uploadTotal/downloadTotal） |
+| GET | `/providers/proxies`、`/providers/rules` | `get_proxy_providers` / `get_rule_providers`（原始 JSON，展示层按配置过滤策略组） |
+| PUT | `/providers/proxies/{name}`、`/providers/rules/{name}` | `update_proxy_provider` / `update_rule_provider`（让内核重新拉取） |
 | DELETE | `/connections/{id}`、`/connections` | `close_connection` / `close_all_connections` |
 
 认证：`secret` 非空时附 `Authorization: Bearer <secret>`。URL 编码使用内置 `urlencoding_simple`。
