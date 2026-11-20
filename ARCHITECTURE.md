@@ -61,7 +61,7 @@ clash-tui/
 | `src/main.rs` | 程序入口、事件循环、**所有键盘事件分发**、后台任务 | `main`、`AppEvent`、`handle_key_event`、`get_clean_config_path` |
 | `src/app.rs` | 核心状态机 `App`（唯一可变状态）、Tab/焦点/光标、弹窗模型、格式化工具 | `App`、`ActiveTab`、`ProxyFocus`、`AddSubModal`、`AddRuleModal`、`DnsModal`、`update_proxies` |
 | `src/ui.rs` | 纯渲染层（Cyber HUD 一体化面板、全息弹窗、Emoji 宽度安全排版），无业务逻辑 | `render`、`render_*_tab`、`render_add_sub_modal`、`render_dns_modal`、`format_display_name` |
-| `src/keymap.rs` | 快捷键帮助的唯一数据源：分组键位表、条目计数与布局行数 | `Binding`、`Section`、`LEFT`、`RIGHT`、`binding_count`、`line_count` |
+| `src/keymap.rs` | 快捷键帮助与页脚提示的唯一数据源：分组键位表、条目计数、布局行数与按标签页的页脚提示 | `Binding`、`Section`、`FooterHint`、`LEFT`、`RIGHT`、`FOOTER_*`、`binding_count`、`line_count` |
 | `src/api.rs` | Mihomo REST 客户端（可 Clone，供 tokio task 持有） | `ClashClient` |
 | `src/core.rs` | Mihomo 内核守护进程生命周期管理 | `CoreManager::{start_core, stop_core, start_core_as_admin, is_running, ensure_default_config}` |
 | `src/kernelupdate.rs` | 内核下载/更新：GitHub Release 探测、资产选择、下载解压、替换并重启 | `KernelUpdateReport`、`update_kernel`、`latest_version`、`installed_version`、`extract_version` |
@@ -267,7 +267,7 @@ clash-tui/
 
 ### 5.9 快捷键帮助浮层（`?`）
 
-`App.show_help` 为 true 时 `render_help_modal` 在全部面板之上绘制双栏帮助：左栏全局键（退出、Tab/数字键、移动、模式、代理开关、端口、重载）+ 连接 + 代理，右栏订阅、设置、规则与弹窗按键。键位表由 `src/keymap.rs` 单一提供（`LEFT` / `RIGHT` 分组），标题里的“共 N 项”与弹窗高度都按该表计算——新增/调整快捷键时只需改 `keymap.rs` 与 `handle_key_event`，不会再出现“帮助漏列、计数写死”的漂移；`ui::tests::help_overlay_is_compact_and_fits_columns` 断言 DIALOGS 末行可见，防止弹窗高度再次裁掉底部条目。`handle_key_event` 在模态弹窗分支之前优先处理该浮层，此时只接受 `Esc` / `?` / `q` 关闭，其余按键一律吞掉——避免在帮助界面误触发停内核、删规则等操作。
+`App.show_help` 为 true 时 `render_help_modal` 在全部面板之上绘制双栏帮助：左栏全局键（退出、Tab/数字键、移动、模式、代理开关、端口、重载）+ 连接 + 代理，右栏订阅、设置、规则与弹窗按键。键位表由 `src/keymap.rs` 单一提供（`LEFT` / `RIGHT` 分组），标题里的“共 N 项”与弹窗高度都按该表计算——新增/调整快捷键时只需改 `keymap.rs` 与 `handle_key_event`，不会再出现“帮助漏列、计数写死”的漂移；`ui::tests::help_overlay_is_compact_and_fits_columns` 断言 DIALOGS 末行可见，防止弹窗高度再次裁掉底部条目。页面底部两行页脚提示同样来自该模块（`FOOTER_GLOBAL` 与按标签页的 `FOOTER_PROXIES/CONNECTIONS/SUBSCRIPTIONS/SETTINGS/RULES`），`render_footer` 只做排版与宽度裁剪，因此帮助与页脚不会各写一套按键名；`keymap::tests::footer_hints_are_backed_by_help_entries` 校验每个页脚按键都能在对应帮助分组里找到。`handle_key_event` 在模态弹窗分支之前优先处理该浮层，此时只接受 `Esc` / `?` / `q` 关闭，其余按键一律吞掉——避免在帮助界面误触发停内核、删规则等操作。
 
 ### 5.10 内核体检与日志查看（Settings 页，按键 `H` / `L`）
 

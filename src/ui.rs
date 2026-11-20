@@ -1,5 +1,6 @@
 use crate::app::{format_bytes, format_speed, ActiveTab, App, ModalField, ProxyFocus, TRAFFIC_HISTORY_CAP};
 use crate::appupdate;
+use crate::keymap;
 use crate::kernelupdate;
 use crate::rules::{ProbeOutcome, RuleTarget};
 use crate::subscriptions::{auto_update_label, SubscriptionItem};
@@ -2613,6 +2614,44 @@ fn fit_footer_line(spans: Vec<Span<'static>>, width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
+/// 页脚第二行：`◈ TITLE: [key] label  [key] label ...`，键位与配色来自 keymap。
+fn footer_hint_line(title: &str, hints: &[keymap::FooterHint]) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(hints.len() * 3 + 1);
+    spans.push(Span::styled(
+        format!(" ◈ {title}: "),
+        Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
+    ));
+    for hint in hints {
+        if spans.len() > 1 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            format!("[{}] ", hint.keys),
+            Style::default().fg(hint.color).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(hint.label));
+    }
+    Line::from(spans)
+}
+
+/// 页脚第一行：全局命令行，`[q] Quit │ [Q] Quit+Stop │ ...`。
+fn global_footer_line(hints: &[keymap::FooterHint]) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(hints.len() * 2);
+    for (index, hint) in hints.iter().enumerate() {
+        let keys = if index == 0 {
+            format!(" [{}] ", hint.keys)
+        } else {
+            format!(" │ [{}] ", hint.keys)
+        };
+        spans.push(Span::styled(
+            keys,
+            Style::default().fg(hint.color).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(hint.label, Style::default().fg(Theme::SUBTEXT0)));
+    }
+    Line::from(spans)
+}
+
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2636,95 +2675,11 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(toast_p, chunks[0]);
     } else {
         let hint_line = match app.active_tab {
-            ActiveTab::Proxies => Line::from(vec![
-                Span::styled(" ◈ PROXIES: ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-                Span::styled("[Enter] ", Style::default().fg(Theme::LAVENDER).add_modifier(Modifier::BOLD)),
-                Span::raw("Select  "),
-                Span::styled("[t] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-                Span::raw("Ping  "),
-                Span::styled("[T] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-                Span::raw("Ping All  "),
-                Span::styled("[o] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),
-                Span::raw("Sort  "),
-                Span::styled("[←/→] ", Style::default().fg(Theme::BLUE).add_modifier(Modifier::BOLD)),
-                Span::raw("Switch Col  "),
-                Span::styled("[PgUp/Dn] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
-                Span::raw("Scroll"),
-            ]),
-            ActiveTab::Connections => Line::from(vec![
-                Span::styled(" ◈ CONNS: ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-                Span::styled("[d] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
-                Span::raw("Close Selected  "),
-                Span::styled("[D] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
-                Span::raw("Close All  "),
-                Span::styled("[PgUp/Dn] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
-                Span::raw("Page Scroll"),
-            ]),
-            ActiveTab::Subscriptions => Line::from(vec![
-                Span::styled(" ◈ SUBS: ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-                Span::styled("[a] ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-                Span::raw("Add  "),
-                Span::styled("[e] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
-                Span::raw("Edit  "),
-                Span::styled("[u] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-                Span::raw("Update  "),
-                Span::styled("[U] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-                Span::raw("Update All  "),
-                Span::styled("[i] ", Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD)),
-                Span::raw("Auto  "),
-                Span::styled("[Enter] ", Style::default().fg(Theme::LAVENDER).add_modifier(Modifier::BOLD)),
-                Span::raw("Activate  "),
-                Span::styled("[x] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
-                Span::raw("Delete"),
-            ]),
-            ActiveTab::Settings => Line::from(vec![
-                Span::styled(" ◈ SETTINGS: ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-                Span::styled("[p] ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-                Span::raw("SysProxy  "),
-                Span::styled("[e] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
-                Span::raw("EnvProxy  "),
-                Span::styled("[n] ", Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD)),
-                Span::raw("TUN  "),
-                Span::styled("[d] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
-                Span::raw("DNS  "),
-                Span::styled("[C] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
-                Span::raw("Config  "),
-                Span::styled("[B] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-                Span::raw("Backup  "),
-                Span::styled("[V] ", Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD)),
-                Span::raw("Providers  "),
-                Span::styled("[Y] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),
-                Span::raw("Traffic  "),
-                Span::styled("[H] ", Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD)),
-                Span::raw("Health  "),
-                Span::styled("[L] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
-                Span::raw("Logs  "),
-                Span::styled("[K] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),
-                Span::raw("Kernel  "),
-                Span::styled("[U] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
-                Span::raw("Update  "),
-                Span::styled("[P] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-                Span::raw("Port  "),
-                Span::styled("[A] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),
-                Span::raw("Admin  "),
-                Span::styled("[s/S] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
-                Span::raw("Core"),
-            ]),
-            ActiveTab::Rules => Line::from(vec![
-                Span::styled(" ◈ RULES: ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-                Span::styled("[a] ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-                Span::raw("Add  "),
-                Span::styled("[t] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-                Span::raw("Cycle Target  "),
-                Span::styled("[K/J] ", Style::default().fg(Theme::BLUE).add_modifier(Modifier::BOLD)),
-                Span::raw("Move  "),
-                Span::styled("[f] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
-                Span::raw("Probe  "),
-                Span::styled("[x] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
-                Span::raw("Delete  "),
-                Span::styled("[PgUp/Dn] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
-                Span::raw("Scroll"),
-            ]),
+            ActiveTab::Proxies => footer_hint_line("PROXIES", keymap::FOOTER_PROXIES),
+            ActiveTab::Connections => footer_hint_line("CONNS", keymap::FOOTER_CONNECTIONS),
+            ActiveTab::Subscriptions => footer_hint_line("SUBS", keymap::FOOTER_SUBSCRIPTIONS),
+            ActiveTab::Settings => footer_hint_line("SETTINGS", keymap::FOOTER_SETTINGS),
+            ActiveTab::Rules => footer_hint_line("RULES", keymap::FOOTER_RULES),
         };
         f.render_widget(
             Paragraph::new(fit_footer_line(hint_line.spans, chunks[0].width)),
@@ -2733,26 +2688,7 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Global Command Deck
-    let global_keys = Line::from(vec![
-        Span::styled(" [q] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
-        Span::styled("Quit", Style::default().fg(Theme::SUBTEXT0)),
-        Span::styled(" │ [Q] ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
-        Span::styled("Quit+Stop", Style::default().fg(Theme::SUBTEXT0)),
-        Span::styled(" │ [Tab] ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-        Span::styled("Next Tab", Style::default().fg(Theme::SUBTEXT0)),
-        Span::styled(" │ [p] ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-        Span::styled("SysProxy", Style::default().fg(Theme::SUBTEXT0)),
-        Span::styled(" │ [e] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
-        Span::styled("EnvProxy", Style::default().fg(Theme::SUBTEXT0)),
-        Span::styled(" │ [n] ", Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD)),
-        Span::styled("TUN", Style::default().fg(Theme::SUBTEXT0)),
-        Span::styled(" │ [P] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled("Port", Style::default().fg(Theme::SUBTEXT0)),
-        Span::styled(" │ [m] ", Style::default().fg(Theme::LAVENDER).add_modifier(Modifier::BOLD)),
-        Span::styled("Mode", Style::default().fg(Theme::SUBTEXT0)),
-        Span::styled(" │ [?] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
-        Span::styled("All Keys", Style::default().fg(Theme::SUBTEXT0)),
-    ]);
+    let global_keys = global_footer_line(keymap::FOOTER_GLOBAL);
     f.render_widget(
         Paragraph::new(fit_footer_line(global_keys.spans, chunks[1].width)),
         chunks[1],
@@ -2856,6 +2792,24 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[test]
+    fn footer_renders_entries_from_keymap() {
+        let mut app = App::new("http://127.0.0.1:9090", None);
+        app.status_msg = None; // 避免 toast 顶掉页脚第一行
+        app.active_tab = ActiveTab::Settings;
+
+        let backend = TestBackend::new(200, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        let dump = dump_buffer(&terminal).replace(' ', "");
+        assert!(dump.contains("◈SETTINGS:[p]SysProxy"), "设置页页脚缺失: {dump}");
+        assert!(dump.contains("[d]DNS"));
+        // 全局命令行同样来自 keymap 表
+        assert!(dump.contains("Quit+Stop"));
+        assert!(dump.contains("[?]AllKeys"));
     }
 
     #[test]

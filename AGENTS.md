@@ -37,7 +37,7 @@ clash-tui uninstall            # 卸载（移除 PATH，清理自启服务）
 | Mihomo 内核下载/更新（Settings → `K`） | `src/kernelupdate.rs`（GitHub Release 探测/下载/解压替换，Windows `zip`、unix `flate2`） |
 | clash-tui 自身版本/自更新（Settings → `U`） | `src/appupdate.rs` + `build.rs`（版本注入、下载替换当前 exe、退出重启） |
 | 内核体检 / 日志查看（Settings → `H` / `L`） | `src/diagnostics.rs`（进程/版本/端口检查、日志尾部读取与级别分类） |
-| 快捷键帮助浮层（`?`） | `app.rs` 的 `show_help`、`main.rs::handle_key_event` 顶部优先分支、`ui.rs::render_help_modal`（改动按键时同步此表） |
+| 快捷键帮助浮层（`?`）/ 页脚提示 | `src/keymap.rs`（单一数据源：`LEFT`/`RIGHT` 帮助分组、`FOOTER_*` 页脚表）、`app.rs` 的 `show_help`、`main.rs::handle_key_event` 顶部优先分支、`ui.rs::render_help_modal`/`render_footer`（新增按键先改 keymap.rs） |
 | 订阅下载/激活/生效配置写入、流量到期、自动更新调度 | `src/subscriptions.rs` |
 | 自定义路由规则（多种类型 / DIRECT-PROXY-指定策略组 / 优先级调整 / 命中推演） | `src/rules.rs`（持久化 rules.json + YAML 注入 + 本地推演） |
 | DNS 覆盖配置（Settings → `d`） | `src/dnsconf.rs`（持久化 data/dns.json + 注入 config.yaml 的 dns 段） |
