@@ -2434,77 +2434,25 @@ fn help_row(key: &'static str, desc: &'static str) -> Line<'static> {
     ])
 }
 
-fn help_left_column(width: u16) -> Vec<Line<'static>> {
-    vec![
-        help_section("GLOBAL", width),
-        help_row("q / Ctrl+C", "退出（内核继续后台运行）"),
-        help_row("Q", "退出并停止内核"),
-        help_row("? / Esc", "打开 / 关闭本帮助"),
-        help_row("Tab / Shift+Tab", "切换标签页"),
-        help_row("1 … 5", "直达对应标签页"),
-        help_row("j k ↑ ↓", "上下移动选中项"),
-        help_row("g G Home End", "跳到首项 / 末项"),
-        help_row("PgUp / PgDn", "整页滚动"),
-        help_row("h l ← →", "左右切换代理组 / 字段"),
-        help_row("Enter", "激活订阅 / 选择节点"),
-        help_row("m", "循环切换代理模式"),
-        help_row("p / e", "系统代理 / 环境代理"),
-        help_row("n", "TUN 虚拟网卡开关"),
-        help_row("P", "修改混合代理端口"),
-        help_row("r", "重载本地订阅与配置"),
-        Line::default(),
-        help_section("CONNECTIONS", width),
-        help_row("d / D", "关闭所选 / 全部连接"),
-        Line::default(),
-        help_section("PROXIES", width),
-        help_row("Enter", "切换所选组内节点"),
-        help_row("t / T", "测速节点 / 整组节点"),
-        help_row("o", "切换节点排序"),
-    ]
-}
-
-fn help_right_column(width: u16) -> Vec<Line<'static>> {
-    vec![
-        help_section("SUBSCRIPTIONS", width),
-        help_row("a", "新增订阅"),
-        help_row("e", "编辑名称 / URL"),
-        help_row("u / U", "更新所选 / 全部订阅"),
-        help_row("i", "切换自动更新间隔"),
-        help_row("Enter", "激活并重载内核"),
-        help_row("x", "删除所选订阅"),
-        Line::default(),
-        help_section("SETTINGS", width),
-        help_row("d", "DNS 覆盖编辑器"),
-        help_row("C", "运行配置覆盖（mode / 日志级别 / LAN）"),
-        help_row("B", "本地配置备份 / 恢复"),
-        help_row("V", "proxy / rule providers 查看与更新"),
-        help_row("Y", "流量历史（峰值 / 会话总量）"),
-        help_row("H", "内核体检（进程/版本/端口）"),
-        help_row("L", "内核日志查看 / 过滤"),
-        help_row("K", "下载 / 更新 Mihomo 内核"),
-        help_row("U", "检查并安装自身更新"),
-        help_row("s / S", "停止 / 重启内核"),
-        help_row("A", "以管理员运行内核"),
-        Line::default(),
-        help_section("RULES", width),
-        help_row("a", "新增域名/IP/GEOSITE 规则"),
-        help_row("t", "循环 DIRECT / 代理组"),
-        help_row("K / J", "上移 / 下移规则优先级"),
-        help_row("f", "域名命中推演"),
-        help_row("x", "删除所选规则"),
-        Line::default(),
-        help_section("DIALOGS", width),
-        help_row("Esc", "关闭弹窗"),
-        help_row("Tab / Shift+Tab", "切换字段"),
-        help_row("Space", "切换开关 / 循环取值"),
-        help_row("Enter", "保存并热重载"),
-    ]
+fn help_column(sections: &[crate::keymap::Section], width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for section in sections {
+        lines.push(help_section(section.title, width));
+        for binding in section.bindings {
+            lines.push(help_row(binding.keys, binding.desc));
+        }
+    }
+    lines
 }
 
 fn render_help_modal(f: &mut Frame, area: Rect) {
-    // 固定尺寸的紧凑对话框：内容约 24 行，不再撑满整屏留出大片空白。
+    // 高度按键位表内容自适应（上/下各留一点背景），不再写死导致底部条目被裁。
+    let body_lines = crate::keymap::line_count(crate::keymap::LEFT)
+        .max(crate::keymap::line_count(crate::keymap::RIGHT));
     let width = 96.min(area.width.saturating_sub(2)).max(40);
-    let height = 35.min(area.height.saturating_sub(2)).max(11);
+    let height = (body_lines as u16 + 6)
+        .min(area.height.saturating_sub(2))
+        .max(11);
     let popup = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -2556,7 +2504,10 @@ fn render_help_modal(f: &mut Frame, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "   · 按作用域分组 · 共 46 项",
+                format!(
+                    "   · 按作用域分组 · 共 {} 项",
+                    crate::keymap::binding_count()
+                ),
                 Style::default().fg(Theme::MUTED),
             ),
         ])),
@@ -2591,7 +2542,7 @@ fn render_help_modal(f: &mut Frame, area: Rect) {
         .split(body);
 
     f.render_widget(
-        Paragraph::new(help_left_column(columns[0].width)),
+        Paragraph::new(help_column(crate::keymap::LEFT, columns[0].width)),
         columns[0],
     );
     let divider = vec![
@@ -2600,7 +2551,7 @@ fn render_help_modal(f: &mut Frame, area: Rect) {
     ];
     f.render_widget(Paragraph::new(divider), columns[1]);
     f.render_widget(
-        Paragraph::new(help_right_column(columns[2].width)),
+        Paragraph::new(help_column(crate::keymap::RIGHT, columns[2].width)),
         columns[2],
     );
 
@@ -2916,13 +2867,14 @@ mod tests {
             .unwrap();
 
         let dump = dump_buffer(&terminal);
-        // 弹窗只占内容所需高度（30 行），上下留出背景
+        // 弹窗高度按 keymap 行数自适应，不再固定 30/35 行（曾因此把 DIALOGS 整组裁掉）
         assert_eq!(dump.lines().next().unwrap(), "");
         assert!(dump.contains("KEY BINDINGS"));
         assert!(dump.contains("FULL KEY REFERENCE"));
         assert!(dump.contains("◈ GLOBAL"));
         assert!(dump.contains("◈ SUBSCRIPTIONS"));
         assert!(dump.contains("◈ DIALOGS"));
+        assert!(dump.replace(' ', "").contains("切换开关/循环取值"), "DIALOGS 末行被裁剪: {dump}");
         assert!(dump.replace(' ', "").contains("?/Esc关闭"));
         // 双栏分隔线存在
         assert!(dump.contains("│"));
@@ -3049,6 +3001,44 @@ mod tests {
         let line = fit_footer_line(spans, 12);
         assert!(line.width() <= 12);
         assert_eq!(line.width(), "TITLE".len());
+    }
+
+    /// 五个标签页都要能在常见终端尺寸和极窄尺寸下完整渲染（布局不会越界 panic）。
+    #[test]
+    fn every_tab_renders_at_common_and_tiny_sizes() {
+        use crate::app::{ActiveTab, App};
+
+        let tabs = [
+            (ActiveTab::Proxies, "PROXIES"),
+            (ActiveTab::Connections, "CONNECTIONS"),
+            (ActiveTab::Subscriptions, "SUBSCRIPTIONS"),
+            (ActiveTab::Settings, "SETTINGS"),
+            (ActiveTab::Rules, "RULES"),
+        ];
+
+        for (tab, marker) in tabs {
+            for (width, height) in [(120u16, 36u16), (40, 12)] {
+                let mut app = App::new("http://127.0.0.1:9090", None);
+                app.active_tab = tab;
+                app.set_status(format!("{marker} smoke"));
+                let backend = TestBackend::new(width, height);
+                let mut terminal = Terminal::new(backend).unwrap();
+                terminal
+                    .draw(|f| render(f, &mut app))
+                    .unwrap_or_else(|e| panic!("{marker} @ {width}x{height} 渲染失败: {e}"));
+                let dump = dump_buffer(&terminal);
+                assert!(
+                    !dump.trim().is_empty(),
+                    "{marker} @ {width}x{height} 渲染结果为空"
+                );
+                if width >= 120 {
+                    assert!(
+                        dump.contains(marker),
+                        "{marker} @ {width}x{height} 缺少标签标题: {dump}"
+                    );
+                }
+            }
+        }
     }
 }
 

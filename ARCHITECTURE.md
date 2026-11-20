@@ -61,6 +61,7 @@ clash-tui/
 | `src/main.rs` | 程序入口、事件循环、**所有键盘事件分发**、后台任务 | `main`、`AppEvent`、`handle_key_event`、`get_clean_config_path` |
 | `src/app.rs` | 核心状态机 `App`（唯一可变状态）、Tab/焦点/光标、弹窗模型、格式化工具 | `App`、`ActiveTab`、`ProxyFocus`、`AddSubModal`、`AddRuleModal`、`DnsModal`、`update_proxies` |
 | `src/ui.rs` | 纯渲染层（Cyber HUD 一体化面板、全息弹窗、Emoji 宽度安全排版），无业务逻辑 | `render`、`render_*_tab`、`render_add_sub_modal`、`render_dns_modal`、`format_display_name` |
+| `src/keymap.rs` | 快捷键帮助的唯一数据源：分组键位表、条目计数与布局行数 | `Binding`、`Section`、`LEFT`、`RIGHT`、`binding_count`、`line_count` |
 | `src/api.rs` | Mihomo REST 客户端（可 Clone，供 tokio task 持有） | `ClashClient` |
 | `src/core.rs` | Mihomo 内核守护进程生命周期管理 | `CoreManager::{start_core, stop_core, start_core_as_admin, is_running, ensure_default_config}` |
 | `src/kernelupdate.rs` | 内核下载/更新：GitHub Release 探测、资产选择、下载解压、替换并重启 | `KernelUpdateReport`、`update_kernel`、`latest_version`、`installed_version`、`extract_version` |
@@ -91,9 +92,9 @@ clash-tui/
 |---|---|---|
 | `Key(KeyEvent)` | 输入监听 task（`event::poll` 50ms） | 键盘输入 |
 | `Tick` | 输入监听 task（空闲时） | 心跳 |
-| `Traffic(up, down)` | 流量轮询 task（1s） | 实时速率 + Sparkline 历史 |
-| `Connections(...)` | 流量轮询 task（1s） | 连接表 |
-| `Version / Configs / Proxies` | 慢速轮询 task（2.5s） | 内核版本、模式/端口/TUN、代理组 |
+| `Traffic(up, down)` | 统一轮询 task（每 tick 1s） | 实时速率 + Sparkline 历史 |
+| `Connections(...)` | 统一轮询 task（每 tick 1s） | 连接表 |
+| `Version / Configs / Proxies` | 统一轮询 task（版本 30s；配置/代理：代理页 2s、其他页 10s） | 内核版本、模式/端口/TUN、代理组 |
 | `DelayResult { node, result }` | 按 `t`/`T` 触发的测速 task | 延迟结果 |
 | `SubUpdated / SubActivated` | 订阅更新/激活 task | 状态提示 + 触发重载 |
 | `CoreActionDone` | 内核启停 task | 状态提示 |
@@ -111,10 +112,10 @@ clash-tui/
 2. `resolve_working_dir()`：**工作目录解析**（全局安装的关键）。只认内核二进制：当前目录存在 `mihomo` / `bin/mihomo` / `bin/mihomo/mihomo` 才保持 cwd，否则 `set_current_dir` 到 exe 所在目录——`data/config.yaml`、`rules.json` 等是程序自己生成的产物，不能当作“这是数据目录”的证据，否则会被误写入的空目录永久劫持；
 3. `CoreManager::is_running()` 探测 → 未运行且已安装则 `start_core()`（detached 后台进程）；
 4. 设置 panic hook（恢复终端）→ 进入 AlternateScreen；
-5. 启动输入监听、流量轮询（1s）、慢速轮询（2.5s）三个 tokio task；
+5. 启动输入监听 + 统一后台轮询两个 tokio task（轮询每个 tick 1s：连接/流量必刷；配置与代理在代理页 2s、其他页 10s；版本 30s，见 §4.1 事件表）；
 6. `App::new()`（读取 SysProxy/EnvProxy 状态、加载 subscriptions.json 与 rules.json）；
 7. `cleanup_stale_backup()` 清理上次自更新残留的 `.old`；5 秒后静默 `check_latest()`，有新版只提示不安装；
-8. 进入主循环 `draw → recv → dispatch`。
+8. 进入主循环 `recv → dispatch → 需要时 draw`（按需重绘：只有真实事件才重画，避免 Tick 把空闲刷新顶到 20fps）。
 
 ---
 
@@ -256,17 +257,17 @@ clash-tui/
 
 **版本注入**：`build.rs` 按优先级写 `CLASH_TUI_VERSION` 并以 `cargo:rustc-env` 注入二进制——CI tag 构建传 `github.ref_name`（如 `v0.2.5`）→ 本地 `git describe --tags --dirty --always` → `CARGO_PKG_VERSION`。`appupdate::VERSION` 即该常量，顶栏与 Settings 卡片直接显示。
 
-**检查**：启动 5 秒后 `check_latest()` 请求 `https://github.com/lusuee/clash-tui/releases/latest`，从跟随重定向后的 URL（`.../releases/tag/vX.Y.Z`）或 HTML 兜底解析最新版本（直连失败回退本地代理）；结果经 `AppUpdateChecked` 只更新提示，不自动安装。
+**检查**：启动 5 秒后 `check_latest()` 先请求 GitHub API `https://api.github.com/repos/lusuee/clash-tui/releases/latest`（读 `tag_name`），失败再退回 `releases/latest` 重定向 + HTML 兜底（直连失败回退本地代理）。优先 API 是因为第三方 GitHub 镜像会把 `user/repo` 段替换成镜像自己的 NAS 路径，拼出的下载 URL 会 404/超时；`CLASH_TUI_GITHUB_API_BASE` 环境变量仅供测试注入本地 mock。结果经 `AppUpdateChecked` 只更新提示，不自动安装。
 
-**安装**（`update_app`）：`is_newer` 成立且当前版本可解析（开发版 `-dirty` 等拒绝）→ 下载 `clash-tui-{windows-x64.zip|linux-x64.tar.gz|darwin-{x64,arm64}.tar.gz}` 到 `data/app-update/` → `extract_binary` 解出 `clash-tui(.exe)` → `install_running_binary`（Windows 不能覆盖运行中的 exe：先把自身改名为 `<exe>.old`，再复制新文件到原路径；失败回滚）。
+**安装**（`update_app`）：`is_newer` 成立且当前版本可解析（开发版 `-dirty` 等拒绝）→ 按发布物原始文件名下载 `clash-tui-{windows-x64.zip|linux-x64.tar.gz|darwin-{x64,arm64}.tar.gz}` 到 `data/app-update/` → `extract_binary` 解出 `clash-tui(.exe)` → `install_binary_at` 两段式落地：先复制到同目录 `.new`（不碰运行中的 exe），再把旧 exe 改名 `.old`，最后把 `.new` 原子改名为目标名；失败则清掉 `.new` 并把 `.old` 改回去。若安装目录不可写（如 `Program Files`），rename/copy 返回 `PermissionDenied` 时改用 UAC 提权助手：以 `Start-Process -Verb RunAs` 拉起本程序，用环境变量 `CLASH_TUI_APPLY_UPDATE=1` + `CLASH_TUI_UPDATE_FROM/TO` 传入路径（避免命令行转义问题），提权实例同样走 `.new` 暂存 + 改名，做完即退出；用户取消 UAC 则保留旧版本并在状态栏报错。
 
-**重启**：安装成功置 `restart_after_exit`，主循环退出、终端恢复后 `restart_into_new_binary()` 用原命令行参数与 cwd 拉起新版本；下次启动 `cleanup_stale_backup()` 删除 `.old`。
+**重启**：安装成功置 `restart_after_exit`，主循环退出、终端恢复后 `restart_into_new_binary()` 用原命令行参数与 cwd 拉起新版本（追加内部参数 `--restart-after-exit`）。新进程先等待 700ms、复位终端（关闭 raw mode、退出 alternate screen、显示光标），再从参数列表里摘掉该标记并继续解析，确保旧进程已退出、两代进程不会同时写同一个控制台；无论是否带该标记，进入 TUI 前都会再做一次终端复位，兜住旧版本遗留的残局。下次启动 `cleanup_stale_backup()` 删除 `.old`。
 
 **依赖**：Windows `zip`，unix `flate2` + `tar`。
 
 ### 5.9 快捷键帮助浮层（`?`）
 
-`App.show_help` 为 true 时 `render_help_modal` 在全部面板之上绘制双栏帮助：左栏全局键（退出、Tab/数字键、移动、模式、代理开关、端口、重载），右栏各标签页动作与弹窗按键。`handle_key_event` 在模态弹窗分支之前优先处理该浮层，此时只接受 `Esc` / `?` / `q` 关闭，其余按键一律吞掉——避免在帮助界面误触发停内核、删规则等操作。
+`App.show_help` 为 true 时 `render_help_modal` 在全部面板之上绘制双栏帮助：左栏全局键（退出、Tab/数字键、移动、模式、代理开关、端口、重载）+ 连接 + 代理，右栏订阅、设置、规则与弹窗按键。键位表由 `src/keymap.rs` 单一提供（`LEFT` / `RIGHT` 分组），标题里的“共 N 项”与弹窗高度都按该表计算——新增/调整快捷键时只需改 `keymap.rs` 与 `handle_key_event`，不会再出现“帮助漏列、计数写死”的漂移；`ui::tests::help_overlay_is_compact_and_fits_columns` 断言 DIALOGS 末行可见，防止弹窗高度再次裁掉底部条目。`handle_key_event` 在模态弹窗分支之前优先处理该浮层，此时只接受 `Esc` / `?` / `q` 关闭，其余按键一律吞掉——避免在帮助界面误触发停内核、删规则等操作。
 
 ### 5.10 内核体检与日志查看（Settings 页，按键 `H` / `L`）
 
@@ -284,7 +285,7 @@ clash-tui/
 
 弹窗内 `Esc` 关闭、`H` / `r` 重新检查；结果状态色：`✔` 绿 / `✘` 红 / `·` 灰（仅参考）。
 
-**日志**（`diagnostics::read_log_tail`）：有 `spawn_blocking` 读取 `data/mihomo.log` 尾部（最多 256KB、保留最后 400 行），弹窗内按行过滤（`filter_lines`，大小写不敏感、只保留最后 300 条匹配），并按 `classify_log_line` 上色：`error/fatal/panic` 红、`warn` 黄、`info` 灰、其余暗色。`Enter` 重新读取、Backspace 删除过滤字符、`Esc` 关闭。
+**日志**（`diagnostics::read_log_tail`）：有 `spawn_blocking` 读取 `data/mihomo.log` 尾部（最多 256KB、保留最后 400 行），弹窗内按行过滤（`filter_lines`，大小写不敏感、只保留最后 300 条匹配），并按 `classify_log_line` 上色：`error/fatal/panic` 红、`warn` 黄、`info` 灰、其余暗色。`Enter` 手动重读；弹窗打开期间主循环每 2 秒自动重读尾部（`App.last_logs_auto` 节流，过滤词保留）；Backspace 删除过滤字符、`Esc` 关闭。
 
 连接页同时展示每条连接的 `PROCESS` 列（`metadata.processPath` 的文件名，去掉 `.exe`，过长截断）。
 

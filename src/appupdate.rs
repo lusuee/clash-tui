@@ -13,6 +13,23 @@ use reqwest::Client;
 pub const RELEASES_LATEST: &str = "https://github.com/lusuee/clash-tui/releases/latest";
 pub const DOWNLOAD_BASE: &str = "https://github.com/lusuee/clash-tui/releases/download";
 
+/// 默认的 GitHub API 最新 Release 地址。
+///
+/// 优先用它而不是 `releases/latest` 重定向：第三方 GitHub 镜像（如 Apple 镜像）
+/// 会把 `user/repo` 段替换成镜像自己的 NAS 路径，导致拼出的资产 URL 404/超时。
+/// 环境变量 `CLASH_TUI_GITHUB_API_BASE` 仅供测试注入本地 mock。
+pub const GITHUB_API_LATEST: &str =
+    "https://api.github.com/repos/lusuee/clash-tui/releases/latest";
+
+fn api_latest_url() -> String {
+    match std::env::var("CLASH_TUI_GITHUB_API_BASE") {
+        Ok(base) if !base.trim().is_empty() => {
+            format!("{}/repos/lusuee/clash-tui/releases/latest", base.trim_end_matches('/'))
+        }
+        _ => GITHUB_API_LATEST.to_string(),
+    }
+}
+
 /// 编译期注入的版本号（`build.rs` 保证该变量存在）。
 pub const VERSION: &str = env!("CLASH_TUI_VERSION");
 
@@ -128,8 +145,56 @@ fn version_from_html(html: &str) -> Option<String> {
     extract_version(&html[start..])
 }
 
-/// 查询 GitHub 上的最新 clash-tui 版本（不含 `v`）。直连失败会回退本地代理。
+/// 查询 GitHub 上的最新 clash-tui 版本（不含 `v`）。
+///
+/// 顺序：GitHub API → Releases 页重定向。正式环境只有 `api.github.com` 能成功，
+/// 第三方 mirror 通过环境变量或镜像解析无法冒充官方 API，避免拼出错误的资产 URL。
 pub async fn check_latest(proxy_port: u16) -> Result<String, String> {
+    match check_latest_api(proxy_port).await {
+        Ok(version) => Ok(version),
+        Err(api_err) => match check_latest_redirect(proxy_port).await {
+            Ok(version) => Ok(version),
+            Err(redirect_err) => Err(format!(
+                "获取 clash-tui 最新版本失败: {api_err}; {redirect_err}"
+            )),
+        },
+    }
+}
+
+/// GitHub API 路径：读取 `tag_name`。
+async fn check_latest_api(proxy_port: u16) -> Result<String, String> {
+    let url = api_latest_url();
+    let proxies = [None, Some(proxy_port).filter(|p| *p > 0)];
+    let mut last_err = String::from("未知错误");
+    for proxy in proxies {
+        let client = match build_client(proxy) {
+            Ok(client) => client,
+            Err(e) => {
+                last_err = e;
+                continue;
+            }
+        };
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if !status.is_success() {
+                    last_err = format!("GitHub API 返回 HTTP {status}");
+                    continue;
+                }
+                let body = resp.text().await.unwrap_or_default();
+                if let Some(version) = tag_name_from_release_json(&body) {
+                    return Ok(version);
+                }
+                last_err = "无法从 GitHub API 响应中解析版本号".to_string();
+            }
+            Err(e) => last_err = format!("{e}"),
+        }
+    }
+    Err(last_err)
+}
+
+/// Releases 页重定向路径（API 被限流或不可用时兜底）。
+async fn check_latest_redirect(proxy_port: u16) -> Result<String, String> {
     let proxies = [None, Some(proxy_port).filter(|p| *p > 0)];
     let mut last_err = String::from("未知错误");
     for proxy in proxies {
@@ -159,7 +224,20 @@ pub async fn check_latest(proxy_port: u16) -> Result<String, String> {
             Err(e) => last_err = format!("{e}"),
         }
     }
-    Err(format!("获取 clash-tui 最新版本失败: {last_err}"))
+    Err(last_err)
+}
+
+/// 从 GitHub Release JSON 里提取 `"tag_name": "v0.2.9"`。
+fn tag_name_from_release_json(body: &str) -> Option<String> {
+    let marker = "\"tag_name\"";
+    let start = body.find(marker)? + marker.len();
+    let rest = &body[start..];
+    let colon = rest.find(':')?;
+    let rest = &rest[colon + 1..];
+    let quote = rest.find('"')?;
+    let rest = &rest[quote + 1..];
+    let end = rest.find('"')?;
+    extract_version(&rest[..end])
 }
 
 async fn download_asset(
@@ -326,28 +404,148 @@ fn install_running_binary(new_binary: &Path) -> Result<PathBuf, String> {
     let exe = std::fs::canonicalize(&exe)
         .map(strip_verbatim)
         .unwrap_or_else(|_| strip_verbatim(exe));
+    install_binary_at(&exe, new_binary)
+}
 
-    let backup = with_suffix(&exe, ".old");
+/// 把新二进制装到 `target`（`target` 可能正是当前运行中的 exe）。
+///
+/// 两步落地：先完整复制到同目录的 `.new`（复制失败时旧文件完全没动），再把旧 exe
+/// 改名成 `.old`，最后把 `.new` 原子改名为目标名。Windows 允许重命名运行中的文件，
+/// 但不允许覆盖它——这也是之前“解压阶段直接写 exe 失败、把旧备份删掉”的修复点。
+fn install_binary_at(target: &Path, new_binary: &Path) -> Result<PathBuf, String> {
+    let backup = with_suffix(target, ".old");
+    let staged = with_suffix(target, ".new");
     let _ = std::fs::remove_file(&backup);
-    std::fs::rename(&exe, &backup)
-        .map_err(|e| format!("无法备份当前程序（安装目录可能需要管理员权限）: {e}"))?;
+    let _ = std::fs::remove_file(&staged);
 
-    match std::fs::copy(new_binary, &exe) {
-        Ok(_) => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755));
-            }
-            Ok(backup)
+    match std::fs::copy(new_binary, &staged) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            request_elevated_update(new_binary, target)?;
+            return Ok(backup);
         }
         Err(e) => {
-            let _ = std::fs::rename(&backup, &exe);
-            Err(format!(
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!(
                 "写入新版本失败: {e}（安装目录可能需要管理员权限）"
-            ))
+            ));
         }
     }
+
+    let mut moved_old = false;
+    if target.exists() {
+        if let Err(e) = std::fs::rename(target, &backup) {
+            let _ = std::fs::remove_file(&staged);
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                return request_elevated_update(new_binary, target).map(|_| backup);
+            }
+            return Err(format!(
+                "无法备份当前程序（安装目录可能需要管理员权限）: {e}"
+            ));
+        }
+        moved_old = true;
+    }
+
+    if let Err(e) = std::fs::rename(&staged, target) {
+        let _ = std::fs::remove_file(&staged);
+        if moved_old {
+            let _ = std::fs::rename(&backup, target);
+        }
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            return request_elevated_update(new_binary, target).map(|_| backup);
+        }
+        return Err(format!(
+            "写入新版本失败: {e}（安装目录可能需要管理员权限）"
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755));
+    }
+    Ok(backup)
+}
+
+/// 提权助手模式的环境变量标记（用环境变量传路径，避免 Start-Process 参数转义问题）。
+pub const ELEVATED_MARKER: &str = "CLASH_TUI_APPLY_UPDATE";
+pub const ELEVATED_FROM: &str = "CLASH_TUI_UPDATE_FROM";
+pub const ELEVATED_TO: &str = "CLASH_TUI_UPDATE_TO";
+
+/// 本进程是否由自更新以管理员身份拉起（是则返回待替换的文件路径）。
+pub fn elevated_update_request() -> Option<(PathBuf, PathBuf)> {
+    if std::env::var(ELEVATED_MARKER).ok().as_deref() != Some("1") {
+        return None;
+    }
+    let from = std::env::var(ELEVATED_FROM).ok()?;
+    let to = std::env::var(ELEVATED_TO).ok()?;
+    if from.is_empty() || to.is_empty() {
+        return None;
+    }
+    Some((PathBuf::from(from), PathBuf::from(to)))
+}
+
+/// 提权进程内执行的替换：先把新镜像写进 `.new` 暂存位，再改名落地（失败回滚）。
+pub fn apply_update_elevated(update: &Path, target: &Path) -> Result<(), String> {
+    let backup = with_suffix(target, ".old");
+    let staged = with_suffix(target, ".new");
+    let _ = std::fs::remove_file(&staged);
+    std::fs::copy(update, &staged).map_err(|e| format!("写入新版本失败: {e}"))?;
+
+    let mut moved_old = false;
+    if target.exists() {
+        let _ = std::fs::remove_file(&backup);
+        if let Err(e) = std::fs::rename(target, &backup) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!("备份旧版本失败: {e}"));
+        }
+        moved_old = true;
+    }
+    if let Err(e) = std::fs::rename(&staged, target) {
+        let _ = std::fs::remove_file(&staged);
+        if moved_old {
+            let _ = std::fs::rename(&backup, target);
+        }
+        return Err(format!("写入新版本失败: {e}"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn request_elevated_update(update: &Path, target: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("定位当前程序失败: {e}"))?;
+    let exe = std::fs::canonicalize(&exe)
+        .map(strip_verbatim)
+        .unwrap_or_else(|_| strip_verbatim(exe));
+    // 单引号转义：PowerShell 里用 '' 表示一个 '。
+    let ps_exe = exe.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "$p = Start-Process -FilePath '{ps_exe}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden; exit $p.ExitCode"
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+        .env(ELEVATED_MARKER, "1")
+        .env(ELEVATED_FROM, update)
+        .env(ELEVATED_TO, target)
+        .status()
+        .map_err(|e| format!("无法发起管理员提权: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("提权被取消或失败：写入程序目录需要管理员权限，请以管理员身份运行 clash-tui 后再更新".to_string())
+    }
+}
+
+#[cfg(not(windows))]
+fn request_elevated_update(_update: &Path, target: &Path) -> Result<(), String> {
+    Err(format!(
+        "写入 {target:?} 需要更高权限，请以管理员身份运行 clash-tui 后再更新"
+    ))
 }
 
 /// 删除上一次更新留下的 `.old`（旧镜像已不再运行，删除失败可忽略）。
@@ -364,12 +562,18 @@ pub fn cleanup_stale_backup() {
 }
 
 /// 退出当前进程后，用同目录的新 exe 重新拉起 TUI（沿用原命令行参数与工作目录）。
+/// 自更新重启参数：新进程先等待父进程退出、重置终端状态，再接管 TUI。
+pub const RESTART_FLAG: &str = "--restart-after-exit";
+
 pub fn restart_into_new_binary() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("定位当前程序失败: {e}"))?;
     let exe = std::fs::canonicalize(&exe)
         .map(strip_verbatim)
         .unwrap_or_else(|_| strip_verbatim(exe));
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.iter().any(|a| a == RESTART_FLAG) {
+        args.push(RESTART_FLAG.to_string());
+    }
     let mut cmd = std::process::Command::new(&exe);
     cmd.args(args);
     if let Ok(cwd) = std::env::current_dir() {
@@ -534,6 +738,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 提权助手只做文件替换：新文件就位、旧文件留成 `.old`。
+    #[test]
+    fn elevated_apply_replaces_binary_and_keeps_backup() {
+        let dir = std::env::temp_dir().join(format!(
+            "clash-tui-elev-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("clash-tui.exe");
+        let update = dir.join("clash-tui-new.exe");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::write(&update, b"new").unwrap();
+
+        apply_update_elevated(&update, &target).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert_eq!(std::fs::read(dir.join("clash-tui.exe.old")).unwrap(), b"old");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 真网络验证：GitHub `releases/latest` 重定向 → 解析 tag（直连失败会自动走本地代理）。
     #[tokio::test]
     #[ignore = "需要网络：访问 GitHub 最新 Release"]
@@ -544,5 +773,104 @@ mod tests {
             "解析出的版本不合法: {latest}"
         );
         println!("latest clash-tui release: v{latest}");
+    }
+
+    /// 环境变量是进程级的：这些测试串行执行，避免互相踩到注入的 API 基址。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn release_zip(dir: &Path, entry: &str, bytes: &[u8]) -> PathBuf {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let archive = dir.join("release.zip");
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file(entry, SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(bytes).unwrap();
+        zip.finish().unwrap();
+        archive
+    }
+
+    fn temp_case_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "clash-tui-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 复现线上问题：安装包被第三方镜像代理后文件名带 `.zip` 后缀时，
+    /// 解压仍应写出可执行文件（改名逻辑保证 .exe 后缀）。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn mirror_proxied_asset_still_extracts_executable() {
+        let dir = temp_case_dir("mirror");
+        let archive = release_zip(&dir, "mirror/dav/ClashTUI-windows-x64.zip/clash-tui-cli.exe", b"mirror-image");
+        let target = dir.join("out.exe");
+        extract_binary(&archive, &target).expect("镜像样式条目也应能解压");
+        assert_eq!(std::fs::read(&target).unwrap(), b"mirror-image");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 解压必须先落到临时文件：target 指向运行中的 exe 时直接写会失败。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn extraction_offloads_before_replacing_running_binary() {
+        let dir = temp_case_dir("offload");
+        let target = dir.join("clash-tui.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &target).unwrap();
+        let archive = release_zip(&dir, "clash-tui-windows-x64/clash-tui.exe", b"new-image");
+        let staged = with_suffix(&target, ".new");
+        extract_binary(&archive, &staged).expect("写暂存文件不受运行中 exe 影响");
+        std::fs::rename(&staged, &target).expect("暂存文件可改名落地");
+        assert_eq!(std::fs::read(&target).unwrap(), b"new-image");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn api_base_follows_injected_environment() {
+        let _guard = env_guard();
+        std::env::set_var("CLASH_TUI_GITHUB_API_BASE", "http://127.0.0.1:4567/api");
+        assert_eq!(
+            api_latest_url(),
+            "http://127.0.0.1:4567/api/repos/lusuee/clash-tui/releases/latest"
+        );
+        std::env::remove_var("CLASH_TUI_GITHUB_API_BASE");
+        assert_eq!(api_latest_url(), GITHUB_API_LATEST);
+    }
+
+    #[tokio::test]
+    async fn unreachable_api_base_fails_without_hitting_github() {
+        let _guard = env_guard();
+        std::env::set_var("CLASH_TUI_GITHUB_API_BASE", "http://127.0.0.1:9");
+        let result = check_latest_api(0).await;
+        std::env::remove_var("CLASH_TUI_GITHUB_API_BASE");
+        assert!(result.is_err(), "不可达的 API 基址应当直接失败");
+    }
+
+    #[test]
+    fn staged_install_replaces_target_and_keeps_backup() {
+        let dir = temp_case_dir("install");
+        let target = dir.join("clash-tui.exe");
+        let incoming = dir.join("incoming.exe");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::write(&incoming, b"new").unwrap();
+
+        let backup = install_binary_at(&target, &incoming).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"old");
+        assert!(!with_suffix(&target, ".new").exists(), "暂存文件应被清理");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

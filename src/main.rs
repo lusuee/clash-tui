@@ -8,6 +8,7 @@ mod dnsconf;
 mod envproxy;
 mod installer;
 mod kernelupdate;
+mod keymap;
 mod overrides;
 mod providers;
 mod rules;
@@ -84,11 +85,35 @@ fn print_help() {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 0. 自更新提权助手：由非提权进程用 UAC 拉起，只做 exe 替换，做完立即退出。
+    if let Some((update, target)) = appupdate::elevated_update_request() {
+        match appupdate::apply_update_elevated(&update, &target) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                eprintln!("✘ {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // 1. Parse arguments
     let mut api_url = "http://127.0.0.1:9090".to_string();
     let mut secret: Option<String> = None;
 
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    // 自更新重启：父进程可能尚未完全退出，且终端刚被切回普通模式。
+    // 先等待并重置一次终端，避免两代进程同时写同一个控制台导致画面错乱。
+    if strip_restart_flag(&mut args) {
+        std::thread::sleep(Duration::from_millis(700));
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            Show
+        );
+        let _ = io::stdout().flush();
+    }
     if args.len() > 1 {
         match args[1].as_str() {
             "install" => {
@@ -189,6 +214,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     // Setup terminal
+    // 进入 TUI 前先复位一次终端：若上一个是自更新前的旧进程，
+    // 可能留下 alternate screen / raw mode 状态，先清干净再接管。
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        Show
+    );
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -216,21 +250,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = ClashClient::new(&api_url, secret.clone());
 
-    // Background poller task for traffic and connections
+    // 当前标签页（供后台轮询按页面调整频率：代理页需要更勤地刷新，其余页面可以低频）。
+    let poll_tab = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+        crate::app::ActiveTab::Proxies as u8,
+    ));
+
+    // 统一后台轮询：每秒一次 tick，按资源分别决定刷新频率，避免两个任务各睡各的、
+    // 在设置页也每 2.5s 拉一次全量 proxies。
     let tx_poll = tx.clone();
     let client_poll = client.clone();
+    let poll_tab_task = poll_tab.clone();
     tokio::spawn(async move {
+        use std::sync::atomic::Ordering;
         let mut last_upload = 0u64;
         let mut last_download = 0u64;
         let mut first = true;
+        let mut tick: u64 = 0;
 
         loop {
             tokio::time::sleep(Duration::from_millis(1000)).await;
+            tick += 1;
+            let on_proxies = poll_tab_task.load(Ordering::Relaxed)
+                == crate::app::ActiveTab::Proxies as u8;
 
-            // Fetch connections & compute instant bandwidth
+            // 连接列表每秒刷新：HUD 流量由连接总量差值折算，必须持续采样。
             if let Ok(conns) = client_poll.get_connections().await {
-                let up_speed = if first { 0 } else { conns.upload_total.saturating_sub(last_upload) };
-                let down_speed = if first { 0 } else { conns.download_total.saturating_sub(last_download) };
+                let up_speed = if first {
+                    0
+                } else {
+                    conns.upload_total.saturating_sub(last_upload)
+                };
+                let down_speed = if first {
+                    0
+                } else {
+                    conns.download_total.saturating_sub(last_download)
+                };
                 last_upload = conns.upload_total;
                 last_download = conns.download_total;
                 first = false;
@@ -240,24 +294,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 let _ = tx_poll.send(AppEvent::Traffic(0, 0));
             }
-        }
-    });
 
-    // Background poller task for core info and proxies
-    let tx_slow = tx.clone();
-    let client_slow = client.clone();
-    tokio::spawn(async move {
-        loop {
-            let ver = client_slow.get_version().await;
-            let _ = tx_slow.send(AppEvent::Version(ver));
+            // 配置与代理列表：代理页每 2s，其他页面每 10s（模式/端口/节点显示不需要高频）。
+            let refresh_meta = if on_proxies { tick % 2 == 0 } else { tick % 10 == 0 };
+            if refresh_meta {
+                let configs = client_poll.get_configs().await;
+                let _ = tx_poll.send(AppEvent::Configs(configs));
+                let proxies = client_poll.get_proxies().await;
+                let _ = tx_poll.send(AppEvent::Proxies(proxies));
+            }
 
-            let configs = client_slow.get_configs().await;
-            let _ = tx_slow.send(AppEvent::Configs(configs));
-
-            let proxies = client_slow.get_proxies().await;
-            let _ = tx_slow.send(AppEvent::Proxies(proxies));
-
-            tokio::time::sleep(Duration::from_millis(2500)).await;
+            // 内核版本只在启动与每 30 秒刷新（自更新/内核更新会主动触发，不需要秒级）。
+            if tick == 1 || tick % 30 == 0 {
+                let ver = client_poll.get_version().await;
+                let _ = tx_poll.send(AppEvent::Version(ver));
+            }
         }
     });
 
@@ -283,10 +334,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // 只在状态变化时重绘：输入线程每 50ms 会发 Tick，但空闲时没必要 20fps 重画整个界面。
+    let mut needs_redraw = true;
+
     while !app.should_quit {
-        terminal.draw(|f| ui::render(f, &mut app))?;
+        // 告知后台轮询当前页面：代理页需要更勤地刷新 proxies。
+        poll_tab.store(app.active_tab as u8, std::sync::atomic::Ordering::Relaxed);
+
+        if needs_redraw {
+            terminal.draw(|f| ui::render(f, &mut app))?;
+            needs_redraw = false;
+        }
 
         if let Some(event) = rx.recv().await {
+            // Tick 只做定时检查（订阅自动更新），没有变化就不重绘。
+            if !matches!(&event, AppEvent::Tick) {
+                needs_redraw = true;
+            }
             match event {
                 AppEvent::Key(key) => {
                     handle_key_event(&mut app, key, &tx).await;
@@ -562,10 +626,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 due.len(),
                                 subscriptions::auto_update_label(app.sub_mgr.auto_update_minutes)
                             ));
+                            needs_redraw = true;
                             for sub in due {
                                 spawn_sub_download(&mut app, &tx, sub);
                             }
                         }
+                    }
+
+                    // 打开日志弹窗时每 2 秒自动重读尾部，过滤关键字保持不变。
+                    if app.show_logs_modal.is_some()
+                        && app.last_logs_auto.elapsed() >= Duration::from_secs(2)
+                    {
+                        app.last_logs_auto = Instant::now();
+                        spawn_logs_reload(&tx);
                     }
                 }
             }
@@ -579,10 +652,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = io::stdout().flush();
 
     if app.restart_after_exit {
-        // 自动更新已替换 exe：用同一套命令行参数与工作目录拉起新版本。
-        match appupdate::restart_into_new_binary() {
-            Ok(()) => println!("Clash TUI 已更新，正在以新版本重新启动..."),
-            Err(e) => println!("✘ {e}"),
+        // 自动更新已替换 exe：先打印提示（此刻仍在普通终端），再拉起等待接管的新进程。
+        println!("Clash TUI 已更新，正在以新版本重新启动...");
+        let _ = io::stdout().flush();
+        if let Err(e) = appupdate::restart_into_new_binary() {
+            println!("✘ {e}");
         }
         std::process::exit(0);
     }
@@ -1619,6 +1693,15 @@ fn looks_like_data_dir(dir: &std::path::Path) -> bool {
 ///   而不是散落在用户随意的 cwd 中；
 /// - exe 目录也没有内核时（尚未放置内核），不要被 cwd 中残留的 data/config.yaml
 ///   等生成物留下，仍然跟随安装目录，保持数据位置唯一。
+/// 自更新重启时，把内部参数从命令行里摘掉（返回是否存在）。
+fn strip_restart_flag(args: &mut Vec<String>) -> bool {
+    let had = args.iter().any(|a| a == appupdate::RESTART_FLAG);
+    if had {
+        args.retain(|a| a != appupdate::RESTART_FLAG);
+    }
+    had
+}
+
 fn resolve_working_dir() {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     if dir_has_kernel(&cwd) {
@@ -1659,4 +1742,31 @@ fn strip_verbatim_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
         s
     };
     std::path::PathBuf::from(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_internal_restart_flag_only() {
+        let mut args = vec![
+            "clash-tui".to_string(),
+            "-u".to_string(),
+            "http://127.0.0.1:9090".to_string(),
+            appupdate::RESTART_FLAG.to_string(),
+        ];
+        assert!(strip_restart_flag(&mut args));
+        assert_eq!(
+            args,
+            vec!["clash-tui", "-u", "http://127.0.0.1:9090"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+
+        let mut plain = vec!["clash-tui".to_string(), "--secret".to_string()];
+        assert!(!strip_restart_flag(&mut plain));
+        assert_eq!(plain.len(), 2);
+    }
 }

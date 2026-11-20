@@ -257,6 +257,8 @@ pub struct App {
     pub show_health_modal: Option<HealthModal>,
     /// 内核日志查看（Settings → L）
     pub show_logs_modal: Option<LogModal>,
+    /// 日志弹窗自动刷新节流：打开期间每 2s 重读一次日志尾部
+    pub last_logs_auto: Instant,
     /// 运行配置覆盖（Settings → C）
     pub show_overrides_modal: Option<OverridesModal>,
     /// 本地配置备份（Settings → B）
@@ -359,6 +361,7 @@ impl App {
             show_providers_modal: None,
             show_health_modal: None,
             show_logs_modal: None,
+            last_logs_auto: Instant::now(),
             show_help: false,
 
             groups_table_state: TableState::default(),
@@ -950,6 +953,7 @@ impl App {
 
     // Kernel log modal (Settings → L)
     pub fn open_logs_modal(&mut self) {
+        self.last_logs_auto = Instant::now();
         self.show_logs_modal = Some(LogModal {
             filter: String::new(),
             lines: Vec::new(),

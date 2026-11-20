@@ -30,6 +30,7 @@ clash-tui uninstall            # 卸载（移除 PATH，清理自启服务）
 | 键盘按键、事件分发、CLI命令 | `src/main.rs`（`handle_key_event`，模态分支在函数顶部优先处理） |
 | Tab/光标/状态/弹窗数据模型 | `src/app.rs`（`App`、`ActiveTab`、导航方法） |
 | 界面渲染 | `src/ui.rs`（`render` 分发 + `render_*_tab/modal`，纯渲染无 I/O） |
+| 快捷键帮助键位表 | `src/keymap.rs`（新增/调整快捷键时改这里 + `handle_key_event`；标题计数与弹窗高度自动同步） |
 | REST 调用 | `src/api.rs`（`ClashClient`，可 Clone 进 tokio task） |
 | 全局安装/PATH管理 | `src/installer.rs`（纯原生注册/注销 PATH） |
 | 内核进程启停/开机自启/UAC 提权 | `src/core.rs`（静默 VBS + 计划任务/LaunchAgents/systemd） |
