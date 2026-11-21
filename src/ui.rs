@@ -288,7 +288,6 @@ fn render_proxies_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
     let group_block = Block::default()
         .title(group_title)
-        .title_bottom(Span::styled(" [h/l] Focus · [j/k] Move ", Style::default().fg(Theme::MUTED)))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(group_border_style);
@@ -390,11 +389,10 @@ fn render_proxies_tab(f: &mut Frame, app: &mut App, area: Rect) {
     let node_block = Block::default()
         .title(node_title)
         .title_bottom(Line::from(vec![
-            Span::styled(" [Enter] Select · [t] Ping · [T] Ping All · [o] Sort │ ", Style::default().fg(Theme::MUTED)),
-            Span::styled("⚡ <100ms  ", Style::default().fg(Theme::GREEN)),
+            Span::styled(" ⚡ <100ms  ", Style::default().fg(Theme::GREEN)),
             Span::styled("● <200ms  ", Style::default().fg(Theme::TEAL)),
             Span::styled("▲ <350ms  ", Style::default().fg(Theme::YELLOW)),
-            Span::styled("■ >600ms", Style::default().fg(Theme::RED)),
+            Span::styled("■ >600ms ", Style::default().fg(Theme::RED)),
         ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -505,10 +503,6 @@ fn render_connections_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .title(conn_title)
-        .title_bottom(Span::styled(
-            " [d] Close Stream · [D] Close All · [/] Search · [c] Details │ Live socket stream ",
-            Style::default().fg(Theme::MUTED),
-        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Theme::active_border());
@@ -631,10 +625,6 @@ fn render_subscriptions_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .title(sub_title)
-        .title_bottom(Span::styled(
-            " [Enter] Activate · [u] Update · [U] Update All · [a] Add · [e] Edit · [x] Delete · [i] Interval ",
-            Style::default().fg(Theme::MUTED),
-        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Theme::active_border());
@@ -814,10 +804,6 @@ fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .title(rules_title)
-        .title_bottom(Span::styled(
-            " [a] Add Rule · [t] Cycle Target · [K/J] Move Prio · [f] Probe · [x] Delete │ Top priority injection ",
-            Style::default().fg(Theme::MUTED),
-        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Theme::active_border());
