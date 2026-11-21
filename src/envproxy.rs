@@ -121,19 +121,19 @@ impl EnvProxy {
 
                 // Try launchctl for system-level session propagation
                 let _ = std::process::Command::new("launchctl")
-                    .args(&["setenv", "http_proxy", &http_val])
+                    .args(["setenv", "http_proxy", &http_val])
                     .output();
                 let _ = std::process::Command::new("launchctl")
-                    .args(&["setenv", "https_proxy", &http_val])
+                    .args(["setenv", "https_proxy", &http_val])
                     .output();
                 let _ = std::process::Command::new("launchctl")
-                    .args(&["setenv", "all_proxy", &socks_val])
+                    .args(["setenv", "all_proxy", &socks_val])
                     .output();
             } else {
                 let _ = fs::remove_file(&env_file);
-                let _ = std::process::Command::new("launchctl").args(&["unsetenv", "http_proxy"]).output();
-                let _ = std::process::Command::new("launchctl").args(&["unsetenv", "https_proxy"]).output();
-                let _ = std::process::Command::new("launchctl").args(&["unsetenv", "all_proxy"]).output();
+                let _ = std::process::Command::new("launchctl").args(["unsetenv", "http_proxy"]).output();
+                let _ = std::process::Command::new("launchctl").args(["unsetenv", "https_proxy"]).output();
+                let _ = std::process::Command::new("launchctl").args(["unsetenv", "all_proxy"]).output();
             }
         }
 

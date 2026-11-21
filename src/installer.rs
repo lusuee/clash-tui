@@ -89,9 +89,9 @@ pub fn install(autostart: bool) -> Result<String, String> {
         if in_path {
             output_msgs.push("You can now run 'clash-tui' anywhere in your terminal.".to_string());
         } else {
-            output_msgs.push(format!(
-                "Note: ~/.local/bin is not in your current PATH. Add it to ~/.zshrc or ~/.bashrc:\n    export PATH=\"$HOME/.local/bin:$PATH\""
-            ));
+            output_msgs.push(
+                "Note: ~/.local/bin is not in your current PATH. Add it to ~/.zshrc or ~/.bashrc:\n    export PATH=\"$HOME/.local/bin:$PATH\"".to_string()
+            );
         }
 
         if autostart {

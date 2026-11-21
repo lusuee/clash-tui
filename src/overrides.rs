@@ -119,11 +119,8 @@ impl OverridesManager {
     }
 
     pub fn save(&self) {
-        if let Some(parent) = self.file_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
         if let Ok(json) = serde_json::to_string_pretty(&self.settings) {
-            let _ = fs::write(&self.file_path, json);
+            let _ = crate::fsutil::atomic_write(&self.file_path, json);
         }
     }
 }

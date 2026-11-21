@@ -112,7 +112,7 @@ impl SubscriptionManager {
             items: self.subscriptions.clone(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&store) {
-            let _ = fs::write(&self.file_path, json);
+            let _ = crate::fsutil::atomic_write(&self.file_path, json);
         }
     }
 
@@ -392,14 +392,14 @@ pub fn deploy_config_yaml(profile_content: &str, mixed_port: u16) -> Result<(), 
             }
         }
         if let Ok(modified_yaml) = serde_yaml::to_string(&yaml_val) {
-            fs::write(&config_dest, modified_yaml)
+            crate::fsutil::atomic_write(&config_dest, modified_yaml)
                 .map_err(|e| format!("Failed to write config.yaml: {}", e))?;
         } else {
-            fs::write(&config_dest, profile_content)
+            crate::fsutil::atomic_write(&config_dest, profile_content)
                 .map_err(|e| format!("Failed to write config.yaml: {}", e))?;
         }
     } else {
-        fs::write(&config_dest, profile_content)
+        crate::fsutil::atomic_write(&config_dest, profile_content)
             .map_err(|e| format!("Failed to write config.yaml: {}", e))?;
     }
 

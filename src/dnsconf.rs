@@ -102,7 +102,7 @@ impl DnsManager {
 
     pub fn save(&self) {
         if let Ok(json) = serde_json::to_string_pretty(&self.settings) {
-            let _ = fs::write(&self.file_path, json);
+            let _ = crate::fsutil::atomic_write(&self.file_path, json);
         }
     }
 }
@@ -192,7 +192,7 @@ pub fn inject_dns_settings(yaml: &mut serde_yaml::Value, settings: &DnsSettings,
         return;
     };
 
-    if !map.contains_key(&k("dns")) {
+    if !map.contains_key(k("dns")) {
         if settings.nameserver.is_empty() {
             return; // 订阅交给系统解析，无需创建 dns 段
         }
@@ -208,12 +208,12 @@ pub fn inject_dns_settings(yaml: &mut serde_yaml::Value, settings: &DnsSettings,
         map.insert(k("dns"), serde_yaml::Value::Mapping(dns));
     }
 
-    let Some(dns_map) = map.get_mut(&k("dns")).and_then(|v| v.as_mapping_mut()) else {
+    let Some(dns_map) = map.get_mut(k("dns")).and_then(|v| v.as_mapping_mut()) else {
         return;
     };
 
     let enabled = dns_map
-        .get(&k("enable"))
+        .get(k("enable"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     if !enabled {
@@ -221,9 +221,9 @@ pub fn inject_dns_settings(yaml: &mut serde_yaml::Value, settings: &DnsSettings,
             return; // 仅自动策略不足以在 DNS 关闭时生效
         }
         let existing_ns = dns_map
-            .get(&k("nameserver"))
+            .get(k("nameserver"))
             .and_then(|v| v.as_sequence())
-            .map_or(false, |s| !s.is_empty());
+            .is_some_and(|s| !s.is_empty());
         if settings.nameserver.is_empty() && !existing_ns {
             return;
         }

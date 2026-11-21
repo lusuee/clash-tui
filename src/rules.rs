@@ -4,9 +4,10 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 /// 规则的命中目标：DIRECT（直连，不经过代理）或 PROXY（解析出的代理组）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuleTarget {
     Direct,
+    #[default]
     Proxy,
 }
 
@@ -16,12 +17,6 @@ impl RuleTarget {
             RuleTarget::Direct => "DIRECT",
             RuleTarget::Proxy => "PROXY",
         }
-    }
-}
-
-impl Default for RuleTarget {
-    fn default() -> Self {
-        RuleTarget::Proxy
     }
 }
 
@@ -96,7 +91,7 @@ impl RuleManager {
 
     pub fn save(&self) {
         if let Ok(json) = serde_json::to_string_pretty(&self.rules) {
-            let _ = fs::write(&self.file_path, json);
+            let _ = crate::fsutil::atomic_write(&self.file_path, json);
         }
     }
 
@@ -555,7 +550,7 @@ pub fn apply_rules_to_config() -> (usize, String) {
         crate::dnsconf::inject_dns_settings(&mut yaml_val, &dns_mgr.settings, &mgr.rules);
         crate::overrides::inject_overrides(&mut yaml_val, &overrides_mgr.settings);
         if let Ok(out) = serde_yaml::to_string(&yaml_val) {
-            let _ = fs::write(&config_path, out);
+            let _ = crate::fsutil::atomic_write(&config_path, out);
         }
         return (count, target);
     }

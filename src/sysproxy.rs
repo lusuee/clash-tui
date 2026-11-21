@@ -181,15 +181,6 @@ impl SysProxy {
                 let _ = std::process::Command::new("networksetup")
                     .args(["-setsocksfirewallproxy", &svc, host, port])
                     .status();
-                let _ = std::process::Command::new("networksetup")
-                    .args(["-setwebproxystate", &svc, "on"])
-                    .status();
-                let _ = std::process::Command::new("networksetup")
-                    .args(["-setsecurewebproxystate", &svc, "on"])
-                    .status();
-                let _ = std::process::Command::new("networksetup")
-                    .args(["-setsocksfirewallproxystate", &svc, "on"])
-                    .status();
             } else {
                 let _ = std::process::Command::new("networksetup")
                     .args(["-setwebproxystate", &svc, "off"])

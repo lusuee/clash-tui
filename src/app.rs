@@ -281,7 +281,6 @@ pub struct App {
 
 impl App {
     pub fn new(base_url: &str, secret: Option<String>) -> Self {
-        let (sys_enabled, _) = SysProxy::get_status().unwrap_or((false, String::new()));
         let env_enabled = EnvProxy::get_status();
         let sub_mgr = SubscriptionManager::new();
         let core_mgr = CoreManager::new();
@@ -300,7 +299,7 @@ impl App {
             is_core_running: false,
             mode: "Rule".to_string(),
             mixed_port: 7897,
-            sys_proxy_enabled: sys_enabled,
+            sys_proxy_enabled: false,
             env_proxy_enabled: env_enabled,
             tun_enabled: false,
             status_msg: Some(("Connecting to Mihomo Core...".to_string(), Instant::now())),
@@ -428,7 +427,7 @@ impl App {
 
         match self.node_sort {
             NodeSort::Default => {}
-            NodeSort::Name => nodes.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase())),
+            NodeSort::Name => nodes.sort_by_key(|a| a.to_lowercase()),
             NodeSort::Ping => nodes.sort_by_key(|n| self.delays.get(n).copied().unwrap_or(u64::MAX)),
         }
 
@@ -668,6 +667,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     pub fn toggle_sys_proxy(&mut self) {
         let next_state = !self.sys_proxy_enabled;
         let server = format!("127.0.0.1:{}", self.mixed_port);
@@ -775,7 +775,7 @@ impl App {
     pub fn update_proxies(&mut self, resp: HashMap<String, ProxyItem>) {
         let mut groups: Vec<String> = resp
             .iter()
-            .filter(|(_, item)| item.all.is_some() && !item.all.as_ref().unwrap().is_empty())
+            .filter(|(_, item)| item.all.as_ref().is_some_and(|all| !all.is_empty()))
             .map(|(name, _)| name.clone())
             .collect();
 

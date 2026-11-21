@@ -6,6 +6,7 @@ mod core;
 mod diagnostics;
 mod dnsconf;
 mod envproxy;
+mod fsutil;
 mod installer;
 mod kernelupdate;
 mod keymap;
@@ -22,7 +23,7 @@ use app::{ActiveTab, App};
 use core::CoreManager;
 use crossterm::{
     cursor::Show,
-    event::{self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -49,6 +50,8 @@ pub enum AppEvent {
     CoreActionDone(String),
     TunToggled(Result<bool, String>),
     PortChanged(Result<u16, String>),
+    SysProxyToggled(Result<bool, String>),
+    SysProxyStatus(bool),
     KernelProgress(u8),
     KernelUpdateDone(Result<kernelupdate::KernelUpdateReport, String>),
     AppUpdateChecked(Result<String, String>),
@@ -232,18 +235,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. Channel for application events
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
 
-    // Input listener task
+    // Input listener task: EventStream 异步事件驱动，零 CPU 空转
     let tx_key = tx.clone();
     tokio::spawn(async move {
-        loop {
-            if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-                if let Ok(Event::Key(key)) = event::read() {
-                    if key.kind == KeyEventKind::Press {
-                        let _ = tx_key.send(AppEvent::Key(key));
+        use crossterm::event::EventStream;
+        use futures_util::StreamExt;
+
+        let mut reader = EventStream::new();
+        while let Some(event) = reader.next().await {
+            match event {
+                Ok(Event::Key(key)) => {
+                    if key.kind == KeyEventKind::Press && tx_key.send(AppEvent::Key(key)).is_err() {
+                        break;
                     }
                 }
-            } else {
-                let _ = tx_key.send(AppEvent::Tick);
+                Ok(_) => {}
+                Err(_) => break,
             }
         }
     });
@@ -270,6 +277,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             tokio::time::sleep(Duration::from_millis(1000)).await;
             tick += 1;
+            let _ = tx_poll.send(AppEvent::Tick);
             let on_proxies = poll_tab_task.load(Ordering::Relaxed)
                 == crate::app::ActiveTab::Proxies as u8;
 
@@ -296,7 +304,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // 配置与代理列表：代理页每 2s，其他页面每 10s（模式/端口/节点显示不需要高频）。
-            let refresh_meta = if on_proxies { tick % 2 == 0 } else { tick % 10 == 0 };
+            let refresh_meta = if on_proxies { tick.is_multiple_of(2) } else { tick.is_multiple_of(10) };
             if refresh_meta {
                 let configs = client_poll.get_configs().await;
                 let _ = tx_poll.send(AppEvent::Configs(configs));
@@ -305,7 +313,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // 内核版本只在启动与每 30 秒刷新（自更新/内核更新会主动触发，不需要秒级）。
-            if tick == 1 || tick % 30 == 0 {
+            if tick == 1 || tick.is_multiple_of(30) {
                 let ver = client_poll.get_version().await;
                 let _ = tx_poll.send(AppEvent::Version(ver));
             }
@@ -334,7 +342,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // 只在状态变化时重绘：输入线程每 50ms 会发 Tick，但空闲时没必要 20fps 重画整个界面。
+    // 启动时后台异步探查系统代理状态，避免在 App::new 中同步执行阻塞
+    {
+        let tx_sys = tx.clone();
+        tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(crate::sysproxy::SysProxy::get_status)
+                .await
+                .unwrap_or(Ok((false, String::new())));
+            if let Ok((enabled, _)) = res {
+                let _ = tx_sys.send(AppEvent::SysProxyStatus(enabled));
+            }
+        });
+    }
+
+    // 只在状态变化时重绘：没有事件或 Tick 无变化时不重画整个界面。
     let mut needs_redraw = true;
 
     while !app.should_quit {
@@ -464,20 +485,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 AppEvent::AppUpdateChecked(res) => {
-                    match res {
-                        Ok(latest) => {
-                            let newer = appupdate::is_newer(&latest, appupdate::VERSION);
-                            app.app_latest = Some(latest.clone());
-                            if newer {
-                                app.set_status(format!(
-                                    "⬆ 发现 clash-tui 新版本 v{}（当前 {}），在设置页按 U 更新",
-                                    latest,
-                                    app.app_version
-                                ));
-                            }
+                    if let Ok(latest) = res {
+                        let newer = appupdate::is_newer(&latest, appupdate::VERSION);
+                        app.app_latest = Some(latest.clone());
+                        if newer {
+                            app.set_status(format!(
+                                "⬆ 发现 clash-tui 新版本 v{}（当前 {}），在设置页按 U 更新",
+                                latest,
+                                app.app_version
+                            ));
                         }
-                        // 启动时的静默检查：失败不打扰用户，按 U 时可重新检查并看到错误
-                        Err(_) => {}
                     }
                 }
                 AppEvent::AppUpdateProgress(pct) => {
@@ -597,7 +614,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app.mixed_port = new_port;
                             app.set_status(format!("✔ 代理端口已更新为 [{}]", new_port));
                             if app.sys_proxy_enabled {
-                                let _ = sysproxy::SysProxy::set_proxy(true, &format!("127.0.0.1:{}", new_port));
+                                let server = format!("127.0.0.1:{}", new_port);
+                                tokio::spawn(async move {
+                                    let _ = tokio::task::spawn_blocking(move || {
+                                        sysproxy::SysProxy::set_proxy(true, &server)
+                                    })
+                                    .await;
+                                });
                             }
                             if app.env_proxy_enabled {
                                 let _ = envproxy::EnvProxy::set_env_proxy(true, new_port);
@@ -605,6 +628,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Err(e) => {
                             app.set_status(format!("✘ 端口修改失败: {}", e));
+                        }
+                    }
+                }
+                AppEvent::SysProxyStatus(enabled) => {
+                    app.sys_proxy_enabled = enabled;
+                }
+                AppEvent::SysProxyToggled(res) => {
+                    match res {
+                        Ok(enabled) => {
+                            app.sys_proxy_enabled = enabled;
+                            let server = format!("127.0.0.1:{}", app.mixed_port);
+                            if enabled {
+                                app.set_status(format!("✔ SysProxy ON ({})", server));
+                            } else {
+                                app.set_status("✔ SysProxy OFF");
+                            }
+                        }
+                        Err(e) => {
+                            app.set_status(format!("✘ SysProxy error: {}", e));
                         }
                     }
                 }
@@ -1246,7 +1288,19 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
             }
         }
         KeyCode::Char('p') => {
-            app.toggle_sys_proxy();
+            let next_state = !app.sys_proxy_enabled;
+            let server = format!("127.0.0.1:{}", app.mixed_port);
+            let action_text = if next_state { "开启" } else { "关闭" };
+            app.set_status(format!("正在{}系统代理...", action_text));
+            let tx_proxy = tx.clone();
+            tokio::spawn(async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    crate::sysproxy::SysProxy::set_proxy(next_state, &server).map(|_| next_state)
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+                let _ = tx_proxy.send(AppEvent::SysProxyToggled(res));
+            });
         }
         KeyCode::Char('e') => {
             if app.active_tab == ActiveTab::Subscriptions {
@@ -1687,12 +1741,6 @@ fn looks_like_data_dir(dir: &std::path::Path) -> bool {
         || dir.join("data").join("config.yaml").exists()
 }
 
-/// 解析工作目录，支持全局命令安装（便携布局）：
-/// - 当前目录含内核（bin/mihomo）时保持当前目录不变（开发与就地运行的既有行为）；
-/// - 否则切换到 exe 所在目录，使通过 PATH 全局启动时数据、内核与配置跟随安装目录，
-///   而不是散落在用户随意的 cwd 中；
-/// - exe 目录也没有内核时（尚未放置内核），不要被 cwd 中残留的 data/config.yaml
-///   等生成物留下，仍然跟随安装目录，保持数据位置唯一。
 /// 自更新重启时，把内部参数从命令行里摘掉（返回是否存在）。
 fn strip_restart_flag(args: &mut Vec<String>) -> bool {
     let had = args.iter().any(|a| a == appupdate::RESTART_FLAG);
@@ -1702,6 +1750,12 @@ fn strip_restart_flag(args: &mut Vec<String>) -> bool {
     had
 }
 
+/// 解析工作目录，支持全局命令安装（便携布局）：
+/// - 当前目录含内核（bin/mihomo）时保持当前目录不变（开发与就地运行的既有行为）；
+/// - 否则切换到 exe 所在目录，使通过 PATH 全局启动时数据、内核与配置跟随安装目录，
+///   而不是散落在用户随意的 cwd 中；
+/// - exe 目录也没有内核时（尚未放置内核），不要被 cwd 中残留的 data/config.yaml
+///   等生成物留下，仍然跟随安装目录，保持数据位置唯一。
 fn resolve_working_dir() {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     if dir_has_kernel(&cwd) {

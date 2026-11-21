@@ -74,8 +74,8 @@ impl CoreManager {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            std::process::Command::new("pkill")
-                .args(["-0", "-f", "mihomo"])
+            std::process::Command::new("pgrep")
+                .args(["-x", "mihomo"])
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false)
@@ -270,7 +270,7 @@ impl CoreManager {
         #[cfg(not(target_os = "windows"))]
         {
             let output = std::process::Command::new("pkill")
-                .args(["-f", "mihomo"])
+                .args(["-x", "mihomo"])
                 .output()
                 .map_err(|e| format!("Failed to execute pkill: {}", e))?;
 
@@ -398,12 +398,13 @@ impl CoreManager {
             std::fs::write(&plist_file, plist_content)
                 .map_err(|e| format!("Failed to write plist: {}", e))?;
 
+            let plist_str = plist_file.to_string_lossy();
             let _ = std::process::Command::new("launchctl")
-                .args(["unload", "-w", plist_file.to_str().unwrap()])
+                .args(["unload", "-w", &plist_str])
                 .output();
 
             let out = std::process::Command::new("launchctl")
-                .args(["load", "-w", plist_file.to_str().unwrap()])
+                .args(["load", "-w", &plist_str])
                 .output()
                 .map_err(|e| format!("Failed to run launchctl load: {}", e))?;
 
@@ -545,7 +546,7 @@ WantedBy=default.target
             let plist_file = PathBuf::from(&home).join("Library/LaunchAgents/com.clash-tui.mihomo.plist");
             if plist_file.exists() {
                 let _ = std::process::Command::new("launchctl")
-                    .args(["unload", "-w", plist_file.to_str().unwrap()])
+                    .args(["unload", "-w", &plist_file.to_string_lossy()])
                     .output();
                 let _ = std::fs::remove_file(&plist_file);
                 Ok("Autostart service disabled (LaunchAgent removed)".to_string())

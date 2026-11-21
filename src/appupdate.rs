@@ -291,8 +291,8 @@ async fn write_response(
                     .await
                     .map_err(|e| format!("写入下载文件失败: {e}"))?;
                 written += chunk.len() as u64;
-                if total > 0 {
-                    let pct = ((written.saturating_mul(100) / total).min(100)) as u8;
+                if let Some(pct) = written.saturating_mul(100).checked_div(total) {
+                    let pct = pct.min(100) as u8;
                     if pct != last_pct {
                         on_progress(pct);
                         last_pct = pct;
