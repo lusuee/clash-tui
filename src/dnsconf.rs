@@ -447,7 +447,7 @@ dns:
         let dns = val.get("dns").unwrap();
         assert_eq!(dns.get("enable").unwrap().as_bool(), Some(true));
         assert_eq!(dns.get("nameserver").unwrap().as_sequence().unwrap().len(), 1);
-        assert!(dns.get("default-nameserver").unwrap().as_sequence().unwrap().len() >= 1);
+        assert!(!dns.get("default-nameserver").unwrap().as_sequence().unwrap().is_empty());
     }
 
     #[test]

@@ -185,26 +185,45 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
 // ----------------------------------------------------------------------------
 fn render_tabs(f: &mut Frame, app: &App, area: Rect) {
     let tab_specs = [
-        (ActiveTab::Proxies, "01", "󰒍 PROXIES"),
-        (ActiveTab::Connections, "02", "󰈀 CONNECTIONS"),
-        (ActiveTab::Subscriptions, "03", "󰑓 SUBSCRIPTIONS"),
-        (ActiveTab::Settings, "04", "󰒓 SETTINGS"),
-        (ActiveTab::Rules, "05", "󰃢 RULES"),
+        (ActiveTab::Proxies, "01", "PROXIES", app.proxies.len()),
+        (ActiveTab::Connections, "02", "CONNECTIONS", app.connections.len()),
+        (ActiveTab::Subscriptions, "03", "SUBSCRIPTIONS", app.sub_mgr.subscriptions.len()),
+        (ActiveTab::Settings, "04", "SETTINGS", 0),
+        (ActiveTab::Rules, "05", "RULES", app.rule_mgr.rules.len()),
     ];
 
     let titles: Vec<Line> = tab_specs
         .iter()
-        .map(|(tab, num, label)| {
+        .map(|(tab, num, label, count)| {
             let is_selected = app.active_tab == *tab;
+            let count_span = if *count > 0 {
+                Span::styled(
+                    format!(" ⟨{}⟩", count),
+                    if is_selected {
+                        Style::default().fg(Theme::CYAN)
+                    } else {
+                        Style::default().fg(Theme::MUTED)
+                    },
+                )
+            } else if *tab == ActiveTab::Subscriptions && !app.sub_mgr.subscriptions.is_empty() {
+                Span::styled(" ⟨Active⟩", Style::default().fg(Theme::GREEN))
+            } else {
+                Span::raw("")
+            };
+
             if is_selected {
                 Line::from(vec![
                     Span::styled(format!(" ◈ {} ", num), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
                     Span::styled(format!("{} ", label), Style::default().fg(Theme::TEXT).add_modifier(Modifier::BOLD)),
+                    count_span,
+                    Span::raw(" "),
                 ])
             } else {
                 Line::from(vec![
                     Span::styled(format!("  {} ", num), Style::default().fg(Theme::MUTED)),
                     Span::styled(format!("{} ", label), Style::default().fg(Theme::SUBTEXT0)),
+                    count_span,
+                    Span::raw(" "),
                 ])
             }
         })
@@ -237,7 +256,7 @@ fn render_tabs(f: &mut Frame, app: &App, area: Rect) {
 fn render_proxies_tab(f: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(32), Constraint::Percentage(68)])
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
         .split(area);
 
     let is_group_focused = app.proxy_focus == ProxyFocus::Groups;
@@ -252,7 +271,7 @@ fn render_proxies_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
     let group_title = Line::from(vec![
         Span::styled(
-            " 󰒍 PROXY GROUPS ",
+            " ◈ PROXY GROUPS ",
             Style::default()
                 .fg(if is_group_focused { Theme::CYAN } else { Theme::SUBTEXT0 })
                 .add_modifier(Modifier::BOLD),
@@ -269,6 +288,7 @@ fn render_proxies_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
     let group_block = Block::default()
         .title(group_title)
+        .title_bottom(Span::styled(" [h/l] Focus · [j/k] Move ", Style::default().fg(Theme::MUTED)))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(group_border_style);
@@ -298,7 +318,7 @@ fn render_proxies_tab(f: &mut Frame, app: &mut App, area: Rect) {
         let cells = vec![
             Cell::from(format!("{}{}", pointer, format_display_name(group_name))),
             Cell::from(Span::styled(format!("⟨{}⟩", count), Style::default().fg(Theme::SAPPHIRE))),
-            Cell::from(Span::styled(format!("➜ {}", format_display_name(now_node)), Style::default().fg(Theme::TEAL))),
+            Cell::from(Span::styled(format!("➜ {}", format_display_name(now_node)), Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD))),
         ];
         group_rows.push(Row::new(cells).style(row_style));
     }
@@ -347,7 +367,7 @@ fn render_proxies_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
     let node_title = Line::from(vec![
         Span::styled(
-            format!(" 󰈀 NODES IN [{}] ", format_display_name(curr_group_name)),
+            format!(" ◈ NODES IN [{}] ", format_display_name(curr_group_name)),
             Style::default()
                 .fg(if is_node_focused { Theme::CYAN } else { Theme::SUBTEXT0 })
                 .add_modifier(Modifier::BOLD),
@@ -369,6 +389,13 @@ fn render_proxies_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
     let node_block = Block::default()
         .title(node_title)
+        .title_bottom(Line::from(vec![
+            Span::styled(" [Enter] Select · [t] Ping · [T] Ping All · [o] Sort │ ", Style::default().fg(Theme::MUTED)),
+            Span::styled("⚡ <100ms  ", Style::default().fg(Theme::GREEN)),
+            Span::styled("● <200ms  ", Style::default().fg(Theme::TEAL)),
+            Span::styled("▲ <350ms  ", Style::default().fg(Theme::YELLOW)),
+            Span::styled("■ >600ms", Style::default().fg(Theme::RED)),
+        ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(node_border_style);
@@ -419,7 +446,7 @@ fn render_proxies_tab(f: &mut Frame, app: &mut App, area: Rect) {
         };
 
         let proto_color = Theme::protocol_color(proto);
-        let proto_badge = format!(" {} ", proto.to_uppercase());
+        let proto_badge = format!(" [{}] ", proto.to_uppercase());
 
         let cells = vec![
             Cell::from(format!("{} {}", pointer, active_mark)).style(active_style),
@@ -468,7 +495,7 @@ fn render_proxies_tab(f: &mut Frame, app: &mut App, area: Rect) {
 // ----------------------------------------------------------------------------
 fn render_connections_tab(f: &mut Frame, app: &mut App, area: Rect) {
     let conn_title = Line::from(vec![
-        Span::styled(" 󰈀 LIVE NETWORK TELEMETRY ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(" ◈ LIVE NETWORK CONNECTIONS ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
         Span::styled(format!("⟨{} active⟩ ", app.connections.len()), Style::default().fg(Theme::MUTED)),
         Span::styled("│ ▲ UP: ", Style::default().fg(Theme::PEACH)),
         Span::styled(format!("{} ", format_bytes(app.total_upload)), Style::default().fg(Theme::TEXT).add_modifier(Modifier::BOLD)),
@@ -478,6 +505,10 @@ fn render_connections_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .title(conn_title)
+        .title_bottom(Span::styled(
+            " [d] Close Stream · [D] Close All · [/] Search · [c] Details │ Live socket stream ",
+            Style::default().fg(Theme::MUTED),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Theme::active_border());
@@ -512,7 +543,7 @@ fn render_connections_tab(f: &mut Frame, app: &mut App, area: Rect) {
             .iter()
             .map(|c| format_display_name(c))
             .collect::<Vec<_>>()
-            .join(" ❯ ");
+            .join(" ➜ ");
         let transfer_line = Line::from(vec![
             Span::styled("▲ ", Style::default().fg(Theme::PEACH)),
             Span::raw(format!("{:<8} ", format_bytes(conn.upload))),
@@ -536,7 +567,7 @@ fn render_connections_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
         let cells = vec![
             Cell::from(format!("{}{}", pointer, host_port)),
-            Cell::from(Span::styled(format!(" {} ", network), Style::default().fg(net_color).add_modifier(Modifier::BOLD))),
+            Cell::from(Span::styled(format!(" [{}] ", network), Style::default().fg(net_color).add_modifier(Modifier::BOLD))),
             Cell::from(transfer_line),
             Cell::from(Span::styled(format!("[{}]", conn.rule), Style::default().fg(Theme::YELLOW))),
             Cell::from(chains),
@@ -582,7 +613,7 @@ fn render_connections_tab(f: &mut Frame, app: &mut App, area: Rect) {
 // ----------------------------------------------------------------------------
 fn render_subscriptions_tab(f: &mut Frame, app: &mut App, area: Rect) {
     let sub_title = Line::from(vec![
-        Span::styled(" 󰑓 SUBSCRIPTION PROFILES ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(" ◈ SUBSCRIPTION PROFILES ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!(
                 "⟨{}/{}⟩ ",
@@ -600,6 +631,10 @@ fn render_subscriptions_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .title(sub_title)
+        .title_bottom(Span::styled(
+            " [Enter] Activate · [u] Update · [U] Update All · [a] Add · [e] Edit · [x] Delete · [i] Interval ",
+            Style::default().fg(Theme::MUTED),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Theme::active_border());
@@ -617,9 +652,9 @@ fn render_subscriptions_tab(f: &mut Frame, app: &mut App, area: Rect) {
 
         let pointer = if is_selected { "❯ " } else { "  " };
         let (active_badge, active_style) = if sub.active {
-            (" ● ACTIVE ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD))
+            (" [● ACTIVE] ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD))
         } else {
-            (" ○ IDLE   ", Style::default().fg(Theme::MUTED))
+            (" [○ IDLE  ] ", Style::default().fg(Theme::MUTED))
         };
 
         let node_cell = if is_updating && sub.node_count == 0 {
@@ -655,17 +690,17 @@ fn render_subscriptions_tab(f: &mut Frame, app: &mut App, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(14),
-            Constraint::Percentage(18),
+            Constraint::Length(15),
+            Constraint::Percentage(20),
             Constraint::Length(12),
-            Constraint::Length(16),
+            Constraint::Length(25),
             Constraint::Length(9),
             Constraint::Length(18),
-            Constraint::Percentage(26),
+            Constraint::Percentage(22),
         ],
     )
     .header(
-        Row::new(vec!["STATE", "PROFILE IDENTIFIER", "NODES", "TRAFFIC", "EXPIRY", "SYNCHRONIZED", "REMOTE URL"])
+        Row::new(vec!["STATE", "PROFILE IDENTIFIER", "NODES", "TRAFFIC USAGE", "EXPIRY", "SYNCHRONIZED", "REMOTE URL"])
             .style(Style::default().fg(Theme::MUTED).add_modifier(Modifier::BOLD)),
     )
     .block(block);
@@ -706,6 +741,14 @@ fn compact_bytes(bytes: u64) -> String {
     }
 }
 
+fn format_traffic_gauge(used: u64, total: u64) -> String {
+    let pct = (used as f64 / total as f64).clamp(0.0, 1.0);
+    let pct_100 = (pct * 100.0).round() as u32;
+    let filled = (pct * 6.0).round() as usize;
+    let bar: String = "█".repeat(filled) + &"░".repeat(6 - filled);
+    format!("{}/{} [{}] {}%", compact_bytes(used), compact_bytes(total), bar, pct_100)
+}
+
 /// 订阅流量单元格：已用/总量，达到 75% / 90% 分别变黄 / 变红
 fn traffic_cell(sub: &SubscriptionItem) -> (String, Style) {
     let used = sub.upload.saturating_add(sub.download);
@@ -718,10 +761,7 @@ fn traffic_cell(sub: &SubscriptionItem) -> (String, Style) {
         } else {
             Style::default().fg(Theme::SUBTEXT0)
         };
-        (
-            format!("{}/{}", compact_bytes(used), compact_bytes(sub.total)),
-            style,
-        )
+        (format_traffic_gauge(used, sub.total), style)
     } else if sub.upload > 0 || sub.download > 0 {
         (
             format!("↑{}/↓{}", compact_bytes(sub.upload), compact_bytes(sub.download)),
@@ -759,7 +799,7 @@ fn expiry_cell(sub: &SubscriptionItem, now_ts: i64) -> (String, Style) {
 // ----------------------------------------------------------------------------
 fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
     let rules_title = Line::from(vec![
-        Span::styled(" 󰃢 PROXY DOMAIN ROUTING MATRIX ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(" ◈ ROUTING RULE MATRIX ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!(
                 "⟨{}/{}⟩ ",
@@ -768,12 +808,16 @@ fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
             ),
             Style::default().fg(Theme::MUTED),
         ),
-        Span::styled("│ PROXY GROUP: ", Style::default().fg(Theme::SURFACE2)),
+        Span::styled("│ DEFAULT: ", Style::default().fg(Theme::SURFACE2)),
         Span::styled(format!("[{}] ", app.rule_mgr.target_hint), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
     ]);
 
     let block = Block::default()
         .title(rules_title)
+        .title_bottom(Span::styled(
+            " [a] Add Rule · [t] Cycle Target · [K/J] Move Prio · [f] Probe · [x] Delete │ Top priority injection ",
+            Style::default().fg(Theme::MUTED),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Theme::active_border());
@@ -787,7 +831,7 @@ fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
             Theme::normal_row()
         };
 
-        let pointer = if is_selected { "❯ " } else { "  " };
+        let pointer = if is_selected { "❯" } else { " " };
         let (rule_color, rule_desc) = match rule.rule_type.as_str() {
             "DOMAIN" => (Theme::MAUVE, "exact hostname"),
             "DOMAIN-SUFFIX" => (Theme::GREEN, "wildcard suffix"),
@@ -806,7 +850,8 @@ fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
         };
 
         let cells = vec![
-            Cell::from(format!("{}{}", pointer, rule.rule_type))
+            Cell::from(format!("{} {:>2}", pointer, idx + 1)).style(Style::default().fg(Theme::MUTED)),
+            Cell::from(format!(" [{}] ", rule.rule_type))
                 .style(Style::default().fg(rule_color).add_modifier(Modifier::BOLD)),
             Cell::from(rule.value.clone()),
             Cell::from(Span::styled(rule_desc, Style::default().fg(Theme::MUTED))),
@@ -818,14 +863,15 @@ fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(22),
-            Constraint::Percentage(48),
+            Constraint::Length(6),
             Constraint::Length(18),
-            Constraint::Length(12),
+            Constraint::Percentage(46),
+            Constraint::Length(18),
+            Constraint::Length(14),
         ],
     )
     .header(
-        Row::new(vec!["RULE TYPE", "DOMAIN PATTERN / KEYWORD", "MATCH STRATEGY", "ROUTE TARGET"])
+        Row::new(vec!["PRIO", "RULE TYPE", "DOMAIN PATTERN / KEYWORD", "MATCH STRATEGY", "ROUTE TARGET"])
             .style(Style::default().fg(Theme::MUTED).add_modifier(Modifier::BOLD)),
     )
     .block(block);
@@ -855,17 +901,11 @@ fn render_rules_tab(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 // ----------------------------------------------------------------------------
-// 7. Tab 4: Settings View (Cyberpunk Hardware & Daemon Control Deck)
+// 7. Tab 4: Settings View (Cyberpunk Bento Hardware & Daemon Deck)
 // ----------------------------------------------------------------------------
-fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Length(11), Constraint::Min(4)])
-        .split(area);
-
-    // Card 1: Mihomo Core Daemon Telemetry
+fn render_core_card(f: &mut Frame, app: &App, area: Rect) {
     let core_block = Block::default()
-        .title(Span::styled(" ⚙ CORE ENGINE & DAEMON TELEMETRY ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(" ⚙ MIHOMO CORE DAEMON ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Theme::inactive_border());
@@ -990,9 +1030,10 @@ fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
             Span::raw("Restart Core Daemon"),
         ]),
     ];
-    f.render_widget(Paragraph::new(core_lines).block(core_block), chunks[0]);
+    f.render_widget(Paragraph::new(core_lines).block(core_block), area);
+}
 
-    // Card 2: Network Interface & Proxy Routing Controls
+fn render_net_card(f: &mut Frame, app: &App, area: Rect) {
     let net_block = Block::default()
         .title(Span::styled(" 󰖟 NETWORK INTERFACE & PROXY SWITCHES ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)))
         .borders(Borders::ALL)
@@ -1123,15 +1164,20 @@ fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("Restart Mihomo with Administrator Rights (UAC Prompt)", Style::default().fg(Theme::RED)),
         ]),
     ];
-    f.render_widget(Paragraph::new(net_lines).block(net_block), chunks[1]);
+    f.render_widget(Paragraph::new(net_lines).block(net_block), area);
+}
 
-    // Card 3: Runtime Architecture Specs
+fn render_specs_card(f: &mut Frame, app: &App, area: Rect, is_wide: bool) {
     let help_block = Block::default()
-        .title(Span::styled(" 󰋖 RUNTIME SPECS & ARCHITECTURE ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            if is_wide { " 󰋖 RUNTIME SPECS & SYSTEM DIAGNOSTICS " } else { " 󰋖 RUNTIME SPECS & ARCHITECTURE " },
+            Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Theme::inactive_border());
-    let help_lines = vec![
+
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("◈ Engine: ", Style::default().fg(Theme::SUBTEXT0)),
             Span::styled("Rust 2021 + Ratatui + Crossterm + Tokio Async Event-Loop", Style::default().fg(Theme::TEXT)),
@@ -1141,7 +1187,82 @@ fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("Ultra-lightweight native binary with 0ms web engine latency & zero webview overhead.", Style::default().fg(Theme::MUTED)),
         ]),
     ];
-    f.render_widget(Paragraph::new(help_lines).block(help_block), chunks[2]);
+
+    if is_wide {
+        lines.push(Line::from(vec![
+            Span::styled("◈ Controller: ", Style::default().fg(Theme::SUBTEXT0)),
+            Span::styled(
+                format!("http://127.0.0.1:9090 [{}]", if app.is_connected { "ONLINE" } else { "OFFLINE" }),
+                Style::default().fg(if app.is_connected { Theme::GREEN } else { Theme::RED }).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("◈ Config Path: ", Style::default().fg(Theme::SUBTEXT0)),
+            Span::styled("data/config.yaml (atomic writes + dynamic rules injection)", Style::default().fg(Theme::SUBTEXT0)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("◈ Diagnostics & Quick Controls:", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  [H] ", Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD)),
+            Span::styled("System Health Check       ", Style::default().fg(Theme::TEXT)),
+            Span::styled("[L] ", Style::default().fg(Theme::TEAL).add_modifier(Modifier::BOLD)),
+            Span::styled("Kernel Daemon Logs", Style::default().fg(Theme::TEXT)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  [d] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled("DNS Nameserver Config     ", Style::default().fg(Theme::TEXT)),
+            Span::styled("[C] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+            Span::styled("Runtime Overrides", Style::default().fg(Theme::TEXT)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  [B] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled("Snapshots & Local Backup  ", Style::default().fg(Theme::TEXT)),
+            Span::styled("[Y] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),
+            Span::styled("Traffic History", Style::default().fg(Theme::TEXT)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  [V] ", Style::default().fg(Theme::SAPPHIRE).add_modifier(Modifier::BOLD)),
+            Span::styled("Providers Manager         ", Style::default().fg(Theme::TEXT)),
+            Span::styled("[P] ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled("Mixed Port Config", Style::default().fg(Theme::TEXT)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  [K] ", Style::default().fg(Theme::PEACH).add_modifier(Modifier::BOLD)),
+            Span::styled("Download / Update Mihomo  ", Style::default().fg(Theme::TEXT)),
+            Span::styled("[U] ", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+            Span::styled("Check TUI Update", Style::default().fg(Theme::TEXT)),
+        ]));
+    }
+
+    f.render_widget(Paragraph::new(lines).block(help_block), area);
+}
+
+fn render_settings_tab(f: &mut Frame, app: &App, area: Rect) {
+    if area.width >= 108 {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(54), Constraint::Percentage(46)])
+            .split(area);
+
+        let left_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(10), Constraint::Min(12)])
+            .split(cols[0]);
+
+        render_core_card(f, app, left_chunks[0]);
+        render_net_card(f, app, left_chunks[1]);
+        render_specs_card(f, app, cols[1], true);
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(9), Constraint::Length(11), Constraint::Min(4)])
+            .split(area);
+
+        render_core_card(f, app, chunks[0]);
+        render_net_card(f, app, chunks[1]);
+        render_specs_card(f, app, chunks[2], false);
+    }
 }
 
 // ----------------------------------------------------------------------------

@@ -851,6 +851,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn unreachable_api_base_fails_without_hitting_github() {
         let _guard = env_guard();
         std::env::set_var("CLASH_TUI_GITHUB_API_BASE", "http://127.0.0.1:9");
