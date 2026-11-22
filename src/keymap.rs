@@ -45,7 +45,7 @@ const fn f(keys: &'static str, label: &'static str, color: Color) -> FooterHint 
 
 const GLOBAL: &[Binding] = &[
     b("q / Ctrl+C", "退出（内核继续后台运行）"),
-    b("Q", "退出并停止内核"),
+    b("Q", "退出并停止内核（关闭代理与 TUN）"),
     b("? / Esc", "打开 / 关闭本帮助"),
     b("Tab / Shift+Tab", "切换标签页"),
     b("1 … 5", "直达对应标签页"),

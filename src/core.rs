@@ -191,7 +191,7 @@ impl CoreManager {
                 }
                 if modified {
                     if let Ok(out) = serde_yaml::to_string(&yaml_val) {
-                        let _ = std::fs::write(config_path, out);
+                        let _ = crate::fsutil::atomic_write(config_path, out);
                         crate::rules::apply_rules_to_config();
                     }
                 }
@@ -612,6 +612,45 @@ fn clean_windows_path<P: AsRef<std::path::Path>>(path: P) -> String {
         stripped.to_string()
     } else {
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ensure_tun_disabled_in_config() {
+        let dir = std::env::temp_dir().join(format!("clash-tui-tun-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let config_path = dir.join("config.yaml");
+
+        // 1. tun.enable is true -> should be updated to false
+        std::fs::write(
+            &config_path,
+            "mixed-port: 7897\ntun:\n  enable: true\n  stack: mixed\n",
+        )
+        .unwrap();
+        CoreManager::ensure_tun_disabled_in_config(&config_path);
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let val: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(val["tun"]["enable"].as_bool(), Some(false));
+        assert_eq!(val["tun"]["stack"].as_str(), Some("mixed"));
+
+        // 2. tun section missing -> should be created with enable: false
+        std::fs::write(&config_path, "mixed-port: 7897\n").unwrap();
+        CoreManager::ensure_tun_disabled_in_config(&config_path);
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let val: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(val["tun"]["enable"].as_bool(), Some(false));
+
+        // 3. tun.enable already false -> remains false
+        CoreManager::ensure_tun_disabled_in_config(&config_path);
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let val: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(val["tun"]["enable"].as_bool(), Some(false));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

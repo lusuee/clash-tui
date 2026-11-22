@@ -148,8 +148,13 @@ pub fn uninstall() -> Result<String, String> {
         }
     }
 
-    // Disable autostart if active
+    // Stop core if running and cleanup system/environment proxies
     let core_mgr = crate::core::CoreManager::new();
+    let _ = core_mgr.stop_core();
+    let _ = crate::sysproxy::SysProxy::set_proxy(false, "");
+    let _ = crate::envproxy::EnvProxy::set_env_proxy(false, 7897);
+
+    // Disable autostart if active
     if core_mgr.is_autostart_enabled() {
         match core_mgr.disable_autostart() {
             Ok(msg) => output_msgs.push(format!("✔ {}", msg)),

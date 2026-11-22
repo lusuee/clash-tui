@@ -704,7 +704,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if app.core_stopped_on_exit {
+        // 1. 关闭 TUN 模式（通知内核优雅卸载虚拟网卡与系统路由，并确保本地配置文件同步关闭）
+        let _ = tokio::time::timeout(Duration::from_millis(500), app.client.set_tun(false)).await;
+        let config_path = std::path::Path::new("data").join("config.yaml");
+        core::CoreManager::ensure_tun_disabled_in_config(&config_path);
+
+        // 2. 停止 Mihomo 内核进程
+        let core_mgr = core::CoreManager::new();
+        let stop_res = core_mgr.stop_core();
+
+        // 3. 关闭系统代理
+        let sys_res = sysproxy::SysProxy::set_proxy(false, "");
+
+        // 4. 取消环境变量代理
+        let env_res = envproxy::EnvProxy::set_env_proxy(false, app.mixed_port);
+
         println!("Clash TUI closed. Mihomo core has been stopped.");
+        let mut details = Vec::new();
+        details.push(match sys_res {
+            Ok(_) => "SysProxy: OFF",
+            Err(e) => {
+                eprintln!("✘ 关闭系统代理失败: {}", e);
+                "SysProxy: ✘"
+            }
+        });
+        details.push(match env_res {
+            Ok(_) => "EnvProxy: OFF",
+            Err(e) => {
+                eprintln!("✘ 取消环境变量失败: {}", e);
+                "EnvProxy: ✘"
+            }
+        });
+        details.push("TUN: OFF");
+        println!("✔ Status: [{}]", details.join(" | "));
+
+        if let Err(e) = stop_res {
+            println!("Note on core shutdown: {}", e);
+        }
     } else {
         println!("Clash TUI closed. Mihomo core continues running in the background.");
     }
@@ -1345,17 +1381,8 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
             }
         }
         KeyCode::Char('Q') => {
-            // 退出并停止内核（q / Ctrl+C 仅退出 TUI，内核常驻）
-            let core_mgr = CoreManager::new();
-            match core_mgr.stop_core() {
-                Ok(msg) => {
-                    app.core_stopped_on_exit = true;
-                    app.set_status(format!("✔ {} | Exiting...", msg));
-                }
-                Err(e) => {
-                    app.set_status(format!("✘ {} | Exiting anyway...", e));
-                }
-            }
+            // 退出并停止内核（带内核一起退出：退出后流水线中停内核、关系统代理、清环境变量、关 TUN）
+            app.core_stopped_on_exit = true;
             app.should_quit = true;
         }
         KeyCode::Enter => {
@@ -1606,9 +1633,13 @@ async fn handle_key_event(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSend
         }
         KeyCode::Char('s') => {
             if app.active_tab == ActiveTab::Settings {
+                let client = app.client.clone();
                 let core_mgr = CoreManager::new();
                 let tx_c = tx.clone();
                 tokio::spawn(async move {
+                    let _ = tokio::time::timeout(Duration::from_millis(500), client.set_tun(false)).await;
+                    let config_path = std::path::Path::new("data").join("config.yaml");
+                    core::CoreManager::ensure_tun_disabled_in_config(&config_path);
                     let res = match core_mgr.stop_core() {
                         Ok(msg) => format!("✔ {}", msg),
                         Err(e) => format!("✘ {}", e),
@@ -1822,5 +1853,34 @@ mod tests {
         let mut plain = vec!["clash-tui".to_string(), "--secret".to_string()];
         assert!(!strip_restart_flag(&mut plain));
         assert_eq!(plain.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn quit_key_leaves_core_running_while_quit_stop_sets_flag() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new("http://127.0.0.1:9090", None);
+
+        // Press 'q': quits TUI but leaves core running
+        handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            &tx,
+        )
+        .await;
+        assert!(app.should_quit);
+        assert!(!app.core_stopped_on_exit);
+
+        // Reset
+        app.should_quit = false;
+
+        // Press 'Q': quits TUI and marks core to be stopped
+        handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT),
+            &tx,
+        )
+        .await;
+        assert!(app.should_quit);
+        assert!(app.core_stopped_on_exit);
     }
 }
